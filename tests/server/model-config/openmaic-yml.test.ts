@@ -106,6 +106,16 @@ describe('parseModelConfig', () => {
     ]);
   });
 
+  it('carries the deployment brand, and still refuses a misspelled key in it', () => {
+    expect(parseModelConfig('brand:\n  name: 智造学堂\n  themeColor: "#0F6E56"\n').brand).toEqual({
+      name: '智造学堂',
+      themeColor: '#0F6E56',
+    });
+    // Cosmetic, but a wrong key is a typo the operator must see rather than a
+    // silently half-applied brand.
+    expect(issuesOf('brand:\n  name: Acme\n  logoSrc: /brand/logo.png\n')[0]).toMatch(/^brand:/);
+  });
+
   it('keeps loading a provider whose preset was retired (veo) and the slots naming it', () => {
     // Google shut down the Veo provider's last models (#1940). A file written
     // for an earlier version must not stop the server; the deployment layer

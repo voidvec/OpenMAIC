@@ -18,6 +18,9 @@ import { AccessCodeGuard } from '@/components/access-code-guard';
 import { ProSwapWatcher } from '@/components/workbench/ProSwapWatcher';
 import { loadLocaleResource } from '@/lib/i18n/load-resource';
 import { LOCALE_COOKIE, resolveRequestLocale } from '@/lib/i18n/resolve-locale';
+import { BrandProvider } from '@/lib/brand/brand-context';
+import { brandCssVariables, DEFAULT_BRAND } from '@/lib/brand/brand-config';
+import { getBrand } from '@/lib/server/brand';
 
 // The UI font is loaded from @fontsource's stylesheet rather than next/font,
 // because only the stylesheet carries the per-subset `unicode-range`
@@ -43,18 +46,53 @@ import '@fontsource-variable/inter';
  */
 const THEME_INIT_SCRIPT = `try{var t=localStorage.getItem('theme');if(t==='dark'||(t!=='light'&&matchMedia('(prefers-color-scheme: dark)').matches))document.documentElement.classList.add('dark')}catch(e){}`;
 
-// Keep the browser's default cutout avoidance: full-screen routes such as
-// classroom do not yet pad their controls for edge-to-edge rendering.
-export const viewport: Viewport = {
-  width: 'device-width',
-  initialScale: 1,
-};
+/**
+ * The tab title and description follow the deployment's brand: a customer
+ * running their own copy should read their product name here, not ours.
+ */
+export async function generateMetadata(): Promise<Metadata> {
+  const brand = getBrand();
+  // Branded when the deployment named itself or brought its own artwork; either
+  // way the shipped product identity is no longer what this page shows.
+  const branded =
+    brand.productName !== DEFAULT_BRAND.productName || brand.markSrc !== DEFAULT_BRAND.markSrc;
+  return {
+    title: brand.productName,
+    description:
+      'The open-source AI interactive classroom. Upload a PDF to instantly generate an immersive, multi-agent learning experience.',
+    applicationName: brand.productName,
+    // A branded deployment also gets its own favicon and home-screen icon,
+    // which it can drop under `public/` without rebuilding the image. The
+    // shipped product keeps its app-router icon files untouched.
+    //
+    // Size and type are spelled out because the app router's `favicon.ico` is
+    // in the document either way: an untyped, unsized candidate loses to it,
+    // and the brand mark would never reach the tab.
+    ...(branded
+      ? {
+          icons: {
+            icon: [{ url: brand.markSrc, type: 'image/png', sizes: '16x16 32x32 48x48' }],
+            apple: [{ url: brand.markSrc, sizes: '180x180' }],
+          },
+        }
+      : {}),
+  };
+}
 
-export const metadata: Metadata = {
-  title: 'OpenMAIC',
-  description:
-    'The open-source AI interactive classroom. Upload a PDF to instantly generate an immersive, multi-agent learning experience.',
-};
+/** The browser chrome picks up the brand accent, per theme. */
+export function generateViewport(): Viewport {
+  const brand = getBrand();
+  return {
+    // Keep the browser's default cutout avoidance: full-screen routes such as
+    // classroom do not yet pad their controls for edge-to-edge rendering.
+    width: 'device-width',
+    initialScale: 1,
+    themeColor: [
+      { media: '(prefers-color-scheme: light)', color: brand.themeColor },
+      { media: '(prefers-color-scheme: dark)', color: brand.themeColorDark ?? brand.themeColor },
+    ],
+  };
+}
 
 export default async function RootLayout({
   children,
@@ -70,9 +108,17 @@ export default async function RootLayout({
   });
   const resources = await loadLocaleResource(locale);
   const { initialMobileLayout } = identifyRequestDevice(headerStore.get('user-agent'));
+  const brand = getBrand();
 
   return (
-    <html lang={locale} suppressHydrationWarning>
+    <html
+      lang={locale}
+      suppressHydrationWarning
+      // The accent is handed to CSS as `--brand-*` so `globals.css` keeps
+      // owning the light/dark split; an inline `--primary` would win over the
+      // `.dark` rule and flatten both themes to one colour.
+      style={brandCssVariables(brand)}
+    >
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
@@ -82,17 +128,19 @@ export default async function RootLayout({
       >
         <AdaptiveProvider initialMobileLayout={initialMobileLayout}>
           <ThemeProvider>
-            <I18nProvider initialLocale={locale} initialResources={resources}>
-              <ModelSettingsInit />
-              <AgentRegistryInit />
-              <ProSwapWatcher />
-              <AccessCodeGuard>{children}</AccessCodeGuard>
-              <Toaster position="top-center" />
-              {/* After the Toaster: this one raises a toast on mount when
-                persistence is already broken, and a toast raised before its
-                host exists has nowhere to go. */}
-              <StorageHealthNotice />
-            </I18nProvider>
+            <BrandProvider brand={brand}>
+              <I18nProvider initialLocale={locale} initialResources={resources}>
+                <ModelSettingsInit />
+                <AgentRegistryInit />
+                <ProSwapWatcher />
+                <AccessCodeGuard>{children}</AccessCodeGuard>
+                <Toaster position="top-center" />
+                {/* After the Toaster: this one raises a toast on mount when
+                  persistence is already broken, and a toast raised before its
+                  host exists has nowhere to go. */}
+                <StorageHealthNotice />
+              </I18nProvider>
+            </BrandProvider>
           </ThemeProvider>
         </AdaptiveProvider>
       </body>

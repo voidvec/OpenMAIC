@@ -72,7 +72,9 @@
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: #722ed1;
+  /* `--brand-primary` is set inline on `<html>` from the deployment's brand
+     (lib/brand/brand-config.ts); the literal is the shipped product accent. */
+  --primary: var(--brand-primary, #722ed1);
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
@@ -107,7 +109,9 @@
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.205 0 0);
   --popover-foreground: oklch(0.985 0 0);
-  --primary: #8b47ea;
+  /* A brand may name a lighter accent for dark surfaces; without one its
+     accent is reused so a single-colour brand still looks deliberate. */
+  --primary: var(--brand-primary-dark, var(--brand-primary, #8b47ea));
   --primary-foreground: oklch(0.205 0 0);
   --secondary: oklch(0.269 0 0);
   --secondary-foreground: oklch(0.985 0 0);

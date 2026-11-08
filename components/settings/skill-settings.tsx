@@ -42,6 +42,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { useI18n } from '@/lib/hooks/use-i18n';
+import { useBrand } from '@/lib/brand/brand-context';
 import {
   agentSkillsErrorText,
   skillTitle,
@@ -248,6 +249,8 @@ function SkillDetailDialog({
   onClose: () => void;
 }) {
   const { t } = useI18n();
+  // The note says which product ships the skill, so it names this deployment.
+  const brand = useBrand();
   const content = useUserSkillContent(skill && skill.source === 'user' ? skill.id : null);
 
   return (
@@ -313,7 +316,7 @@ function SkillDetailDialog({
                 data-testid="skill-settings-detail-note"
                 className="rounded-md border border-border bg-muted/50 px-2.5 py-2 text-xs text-muted-foreground"
               >
-                {t('settings.skills.builtinDetailNote')}
+                {t('settings.skills.builtinDetailNote', { brand: brand.productName })}
               </p>
             )}
 

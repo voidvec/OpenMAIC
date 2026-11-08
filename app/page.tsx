@@ -46,6 +46,7 @@ import { useMobileLayout } from '@/lib/adaptive/adaptive-provider';
 import { installPageScrollBoundary } from '@/lib/adaptive/page-scroll-boundary';
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { useI18n } from '@/lib/hooks/use-i18n';
+import { useBrand } from '@/lib/brand/brand-context';
 import { LanguageSwitcher } from '@/components/language-switcher';
 import { createLogger } from '@/lib/logger';
 import { Button } from '@/components/ui/button';
@@ -160,6 +161,7 @@ const initialFormState: FormState = {
 
 function HomePage() {
   const { t } = useI18n();
+  const brand = useBrand();
   const { theme, setTheme } = useTheme();
   const router = useRouter();
   const mobile = useMobileLayout();
@@ -904,8 +906,8 @@ function HomePage() {
         {/* ── Logo ── */}
         <div className="home-brand relative" data-pro-morph="lockup">
           <img
-            src="/logo-horizontal.png"
-            alt="OpenMAIC"
+            src={brand.logoSrc}
+            alt={brand.productName}
             className={cn(
               'h-12 md:h-16 mb-2 -ml-2 md:-ml-3',
               heroEnter('fade-in zoom-in-90 duration-500 delay-100'),
@@ -1671,7 +1673,7 @@ function HomePage() {
 
       {/* Footer — flows with content, at the very end */}
       <div className="home-footer mt-auto pt-12 pb-4 text-center text-xs text-muted-foreground/40">
-        OpenMAIC Open Source Project
+        {brand.productName} Open Source Project
       </div>
     </div>
   );

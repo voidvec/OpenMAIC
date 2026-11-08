@@ -157,3 +157,22 @@ slots:
 # Add sandbox to the existing lock list (or use lock: all) to make it read-only:
 # lock: [sandbox]
 # A locked, absent sandbox section stays disabled.
+
+# The product identity this deployment shows (white-label). Optional: without
+# it every surface uses the shipped OpenMAIC brand. Cosmetic only — a value the
+# renderer cannot use falls back to the shipped brand instead of stopping the
+# server. `logo` and `mark` are paths under public/, which the Docker override
+# mounts from the host, so new artwork needs no rebuild. The env equivalents are
+# OPENMAIC_BRAND_* (see .env.example), read when this block is absent.
+#
+# `logo` is drawn on both the light and the dark palette, so export it with its
+# own background (or as a mid-tone mark) rather than dark glyphs on
+# transparency, which disappear in dark mode.
+# brand:
+#   name: 智造学堂
+#   shortName: 智造学堂
+#   logo: /brand/logo-horizontal.png
+#   mark: /brand/mark.png
+#   logoHasWordmark: true
+#   themeColor: "#0F6E56"
+#   themeColorDark: "#3DD6A8"

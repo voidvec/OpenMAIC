@@ -169,6 +169,28 @@ const lockSchema = z.union([z.literal('all'), z.array(z.string())], {
   error: 'expected "all" or a list of slots',
 });
 
+/**
+ * The deployment's own product identity (white-label). Purely cosmetic, so the
+ * schema only refuses the wrong type: a value the renderer cannot use falls
+ * back to the shipped brand instead of keeping the server from starting.
+ */
+const brandSchema = z
+  .object({
+    /** Product name shown in page titles and logo alt text. */
+    name: z.string().min(1),
+    /** Short name for space-constrained spots; defaults to `name`. */
+    shortName: z.string().min(1).optional(),
+    /** Horizontal logo, as a path under `public/`. */
+    logo: z.string().min(1).optional(),
+    /** Square mark (favicon, headers), as a path under `public/`. */
+    mark: z.string().min(1).optional(),
+    /** Whether the logo already carries the wordmark. */
+    logoHasWordmark: z.boolean().optional(),
+    themeColor: z.string().min(1).optional(),
+    themeColorDark: z.string().min(1).optional(),
+  })
+  .strict();
+
 const fileSchema = z
   .object({
     providers: z
@@ -180,6 +202,8 @@ const fileSchema = z
     lock: lockSchema.optional(),
     /** Whether users may add providers, keys and token plans of their own (default true). */
     allowUserKeys: z.boolean().optional(),
+    /** This deployment's own product identity (white-label). */
+    brand: brandSchema.optional(),
     // Never accepted: reported with the key that replaced it.
     policy: z
       .never({
