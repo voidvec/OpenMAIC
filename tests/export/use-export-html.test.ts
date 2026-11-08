@@ -90,7 +90,7 @@ afterEach(() => {
 
 describe('useExportHtml', () => {
   it('links PBL scenes to the classroom without any stage-meta request, then clears the busy state', async () => {
-    const fetchSpy = vi.fn(() => new Promise<Response>(() => {}));
+    const fetchSpy = vi.fn((_input: RequestInfo | URL) => new Promise<Response>(() => {}));
     vi.stubGlobal('fetch', fetchSpy);
     try {
       await act(async () => {
@@ -101,7 +101,12 @@ describe('useExportHtml', () => {
     }
 
     expect(mocks.fetchStageMeta).not.toHaveBeenCalled();
-    expect(fetchSpy).not.toHaveBeenCalled();
+    // Building the export asks the server for nothing. The one request that may
+    // happen is the best-effort hand-off of the saved artifact to the cloud
+    // delivery queue (`lib/download/auto-deliver.ts`), which every save makes.
+    for (const [url] of fetchSpy.mock.calls) {
+      expect(String(url)).toBe('/api/deliver/upload');
+    }
     expect(mocks.buildStandaloneHtmlExport).toHaveBeenCalledTimes(1);
     expect(mocks.buildStandaloneHtmlExport.mock.calls[0][2]).toMatchObject({
       classroomUrl: `${window.location.origin}/classroom/stage-hook`,

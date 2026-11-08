@@ -71,6 +71,14 @@ export async function register(): Promise<void> {
   const { startAssetCollectorSchedule } =
     await import('@/lib/persistence/asset-collector-schedule');
   const assetSchedule = startAssetCollectorSchedule();
+
+  // Export delivery (cloud upload, share link, Feishu notice). A local
+  // deployment capability, off unless DELIVER_ENABLED is set; imported
+  // dynamically for the same reason as everything else here — the Edge bundle
+  // must never pull in `pg`.
+  const { startExportDeliveryWorker } = await import('@/lib/server/deliver/worker');
+  const deliveryWorker = startExportDeliveryWorker();
+
   const { startCheckpointCollector } = await import('@/lib/server/sandbox/checkpoint-collector');
   const checkpointSchedule = startCheckpointCollector();
   const { startLearningLifecycle } = await import('@/lib/server/pbl-v3/lifecycle-schedule');
@@ -112,6 +120,7 @@ export async function register(): Promise<void> {
         ['Material extractor', materialExtractor],
         ['Agent runner', runner],
         ['Generation runner', generationRunner],
+        ['Export delivery', deliveryWorker],
       ] as const;
       await Promise.all([
         ...workers.map(async ([name, worker]) => {
