@@ -1,0 +1,7 @@
+# 大体积二进制不进 git，按 deploy/README.md 下载后放回原位。
+
+# piper 中文语音模型（61 MB）。edge 后端不需要它。
+tutorial-video/piper-tts/voices/*.onnx
+
+# aliyunpan CLI（17 MB），deliver-sidecar 镜像构建时需要。
+deliver-sidecar/bin/

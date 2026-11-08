@@ -6,6 +6,10 @@ node_modules/
 packages/pptxgenjs/
 packages/mathml2omml/
 
+# Third-party model assets: downloaded, never authored here, so formatting them
+# would only churn the diff every time the asset is refreshed.
+deploy/tutorial-video/piper-tts/voices/
+
 # @openmaic workspace packages: the source is formatted to the root style, but skip
 # generated build output and the vendored legacy reference under the importer.
 packages/@openmaic/*/dist/

@@ -1,6 +1,12 @@
 # dependencies
-node_modules
-.pnpm-store
+# `**/` matters: Docker matches these patterns against the full relative path,
+# so a bare `node_modules` only covers the root one. The workspace packages keep
+# their own `node_modules` (pnpm links), and copying a host's Windows junctions
+# over the image's Linux links leaves `rollup` (and everything else) pointing at
+# a path that does not exist — `pnpm run build:packages` then dies with
+# "Cannot find module '/app/packages/mathml2omml/node_modules/rollup/...'".
+**/node_modules
+**/.pnpm-store
 
 # build output
 .next
@@ -39,3 +45,8 @@ docs
 # isolated MP4 render service — built as its own image (render-service/Dockerfile),
 # never part of the main app image.
 render-service
+
+# Local-only workspace: agent memory, private docs, delivery fixtures and the
+# Aliyun Drive login token. None of it belongs in an image, and `COPY . .` would
+# otherwise bake it in.
+.workbuddy

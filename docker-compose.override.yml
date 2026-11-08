@@ -1,0 +1,298 @@
+# 本地部署覆盖层 —— 进 git
+#
+# 位置：仓库根。文件名是 compose 的默认覆盖层（docker-compose.override.yml），
+# 只要在根目录执行 `docker compose` 就会被**自动合并**，不需要 -f。
+# 这是本项目唯一一份 override：以前散在 docs/tutorial-video/ 和 deploy/tutorial-video/
+# 两处，且文件名不在自动加载位，只能靠命令行 -f 记住，换台机器极易漏掉。
+#
+# 启动（在仓库根，一条命令即可，不再有 -f）：
+#   docker compose --profile video-export up -d
+#
+# 背景：宿主 3000 端口被另一个无关容器占用
+#   new-api || 0.0.0.0:3000->3000/tcp, [::]:3000->3000/tcp
+# 而 docker-compose.yml 里 openmaic 发布的是硬编码 '3000:3000'，
+# 直接 up 会以 "port is already allocated / address already in use" 失败。
+#
+# 这里用 !override 替换（而不是追加）ports 列表，把宿主端口改为 3100。
+# 容器内部的 3000 保持不变 —— RENDER_SERVICE_URL、健康检查等都不受影响。
+#
+# 若哪天 new-api 不再占用 3000，删掉本文件即可回到默认端口。
+#
+# ⚠️ 本文件里所有 ./ 路径都相对**项目目录**（也就是仓库根，即本文件所在目录），
+#    与 `docker-compose.yml` 一致 —— 移动本文件时不要再动相对路径。
+# 两个 TTS 服务共用的构建配置（YAML 锚点）。
+# ⚠️ 必须放在 services 之外 —— 放在里面会被 compose 当成一个名叫 x-tts-shim 的
+#    第三个服务（它有 build+image，会被真的启动起来）。
+x-tts-shim: &tts-shim
+  build:
+    context: ./deploy/tutorial-video/piper-tts
+    dockerfile: Dockerfile
+    # 国内构建加速：pip 走镜像源（compose 支持 :- 默认值，与 openmaic.yml 不同）。
+    # 在 .env 里设 PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple 即可。
+    args:
+      PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+  # 由 openmaic-piper-tts 更名而来 —— 现在同一个镜像承载 piper 与 edge 两个后端
+  image: openmaic-tts-shim:latest
+  restart: unless-stopped
+
+services:
+  openmaic:
+    ports: !override
+      # 绑回环而不是 0.0.0.0：这是台单人开发机，3100 上没有鉴权，绑全网卡等于
+      # 把课堂生成、导出、上云队列一起放在同网段任何人的浏览器里。要用手机或
+      # 另一台机器预览时，临时改成 '3100:3000' 再 up -d，预览完改回来。
+      - '127.0.0.1:3100:3000'
+
+    # 服务端 provider 声明：上游 RFC #1701 的 openmaic.yml。
+    # 旧的 server-providers.yml 已彻底移除（2026-11-03）：它的 custom-* 条目在
+    # RFC #1701 之后不再参与槽位解析，只会让每次启动多刷一条 WARN。
+    # 只读挂进容器 /app；volumes 是「按目标路径合并」，这里只追加不改写上面那条 openmaic-data。
+    volumes:
+      # 上游 RFC #1701 的模型配置（取代 custom-* 声明式 provider）。
+      # .dockerignore:24 排除了它 ⇒ 镜像里没有，必须挂载；默认读取路径即
+      # /app/openmaic.yml（cwd=WORKDIR=/app），不需要设 OPENMAIC_CONFIG。
+      # ⚠️ 该文件解析失败会让服务**启动直接失败**，改完先校验再重启。
+      - ./openmaic.yml:/app/openmaic.yml:ro
+      # ⚠️ 只挂**需要热更新**的那几个子路径，绝不整目录挂 public/。
+      # 曾经的写法是 `./public:/app/public:ro`，理由是「一份源码、覆盖无差异」——
+      # 那个理由只在 vendor/standalone-player 出现之前成立：那是 `pnpm build`
+      # 在镜像构建期生成、且被 .gitignore 忽略的产物（player.min.js / player.min.css /
+      # player-charts.min.js / katex-fonts.min.css），宿主根本没有。整目录一盖，
+      # 离线 HTML 导出就会 `Standalone player asset unavailable (HTTP 404)` 直接失败。
+      # 另外 Next standalone 在**启动时**缓存 public 的文件清单，中途往挂载里放文件
+      # 仍会 404，必须 restart 才认。
+      # ComfyUI workflow：comfyui-image-adapter 用 fs 读 process.cwd()/public/，
+      # 挂载后改 workflow 免重建镜像。ro：Next.js 不写 public/。
+      - ./public/comfyui-sdxl.json:/app/public/comfyui-sdxl.json:ro
+      - ./public/comfyui-sdxl-fast.json:/app/public/comfyui-sdxl-fast.json:ro
+      # 白标素材（logo / mark）：换图后 up -d --force-recreate openmaic 即可，不重建镜像。
+      - ./public/brand:/app/public/brand:ro
+      # 交付产物归档：Next 写、deliver-sidecar 读（同一份卷，避免跨容器传 100MB+）
+      - ./.workbuddy/deliver/data:/data
+
+    # ---------------------------------------------------------------------
+    # 语言模型 / TTS：openmaic.yml（RFC #1701，取代 custom-* 声明式 provider）
+    # ---------------------------------------------------------------------
+    # provider 本身（id / preset / apiKey / baseUrl / models）与 slot 绑定
+    # 都写在 openmaic.yml 里，只有**密钥与端点**经下面的 environment: 从 .env
+    # 透传进容器。MODEL_ROUTES 已从上游移除，由 `slots` 表达。
+    environment:
+      # ── openmaic.yml 的 ${VAR}（未设置 = 启动直接失败，没有默认值）─────────
+      - CUSTOM_LLM_API_KEY=${CUSTOM_LLM_API_KEY}
+      - CUSTOM_LLM_BASE_URL=${CUSTOM_LLM_BASE_URL}
+      - CUSTOM_LLM_MODEL=${CUSTOM_LLM_MODEL}
+
+      # 关掉 Node 22 的 happy-eyeballs（`autoSelectFamily`）。
+      # 症状：宿主 curl 该端点 200，容器内 `wget` 也 200，但应用报
+      # `Cannot connect to API:`（空消息）、undici 抛 `TypeError: fetch failed`
+      # + `ETIMEDOUT`，且**只有约 0.5 秒**就失败。
+      # 原因：autoSelectFamily 给每个候选地址的单次尝试窗口默认 250ms，而
+      # open.bigmodel.cn 这条链路 TCP 握手就要 ~490ms ⇒ 两次尝试（IPv6、IPv4）
+      # 都在窗口内被判超时。按 IP 直连或关掉该特性即恢复（实测 200）。
+      # 保留项：换成任何高延迟端点（境外中转站）都可能再撞上，故长期开启。
+      - NODE_OPTIONS=--no-network-family-autoselection
+
+      # 弃用兼容：DEFAULT_MODEL 已不设。上游在 openmaic.yml 存在时会忽略它，
+      # 且 legacy registry 里没有 `llm` 这个 id（它是 preset: openai-compatible），
+      # 设了只会每次启动刷一条 `Unknown provider "llm" in DEFAULT_MODEL` 告警。
+      # slot 绑定以 openmaic.yml 的 `slots.llm` 为准。
+
+      # 置空 = 停用。provider-config.ts 用 `process.env.X || undefined`，
+      # 空字符串等同未设置 → DeepSeek 不再出现在服务端 provider 列表里。
+      - DEEPSEEK_API_KEY=
+
+      # ── ComfyUI 图像生成（本地 Desktop，宿主机 8188）───────────────────────
+      # 自托管放行 SSRF 守卫的 localhost/私网目标（设置页 Base URL 填
+      # http://host.docker.internal:8188 时必需）；cloud metadata 端点仍永久拦截。
+      - ALLOW_LOCAL_NETWORKS=${ALLOW_LOCAL_NETWORKS:-}
+
+      # ── 交付流水线（本地私有，不属上游功能）────────────────────────────────
+      # 产物上云与建分享链接由 deliver-sidecar 执行（原因见该服务注释）。
+      # Next 侧只拿到一个内网 URL 和一个共享令牌。
+      - DELIVER_SIDECAR_URL=${DELIVER_SIDECAR_URL:-http://deliver-sidecar:8099}
+      - DELIVER_SIDECAR_TOKEN=${DELIVER_SIDECAR_TOKEN:-}
+      # 每次导出自动上云。不设 = 关闭（上游行为）；开启后由后台 worker 消费
+      # export_deliveries 表，MP4 在服务端取回、其余格式由浏览器上传。
+      - DELIVER_ENABLED=${DELIVER_ENABLED:-}
+      # 与 sidecar 共享的卷；sidecar 只读这个根之下的路径。
+      - DELIVER_DATA_ROOT=/data
+      - DELIVER_CLOUD_ROOT=${DELIVER_CLOUD_ROOT:-/课件}
+      # 飞书自定义机器人（交付完成 / 失败推群）
+      - FEISHU_WEBHOOK_URL=${FEISHU_WEBHOOK_URL:-}
+      - FEISHU_WEBHOOK_SECRET=${FEISHU_WEBHOOK_SECRET:-}
+
+  # 渲染任务硬超时 —— 默认 45 分钟（render-service/src/config.ts:88：
+  #   jobDeadlineMs: intEnv('RENDER_JOB_DEADLINE_MS', 45 * 60 * 1000)）
+  #
+  # 为什么需要抬高：mRQO6WQiBW 这堂课共 48,993 帧 / 1633 秒（30fps），
+  # 实测捕获速率约 17.6 帧/秒（单 worker，screenshot 模式），跑完需要 ~46.4 分钟，
+  # 刚好越过 45 分钟上限。2026-09-14 16:21 那次渲染就是在 47,442/48,993 帧（96.8%）
+  # 被 deadline_exceeded 掐断，前功尽弃 —— 只差约 1.4 分钟。
+  #
+  # 2026-10-20 实测（14 场景，1080p/30/standard，58971 帧）：74.2 毫秒/帧、
+  # 渲染 4373.5s（72.9 分钟），成片 32.76 分钟。90 分钟只剩 17 分钟余量，
+  # 再长一点的课件必然被掐。故抬到 150 分钟：1080p/24/standard 约 47,177 帧
+  # ≈ 58 分钟，1080p/30 更长课件也有 ~77 分钟可烧，都留足一半余量。
+  # 前端轮询预算跟随这里下发的 deadlineMs（+5 分钟组装余量，上限 4 小时），
+  # 所以改这个值即可，不用再动 lib/store/video-render.ts。
+  render-service:
+    environment:
+      - RENDER_JOB_DEADLINE_MS=${RENDER_JOB_DEADLINE_MS:-9000000}
+      # 导出耗时台账：每次渲染完成追加一行 JSON（总耗时 + plan/chunks/assemble
+      # 三阶段耗时 + 当时的 chunk 配置）。容器内 /tmp 会随 --force-recreate 丢失，
+      # 而对比「改配置前 / 改配置后」恰恰需要跨重建保留，所以挂到宿主机 logs/。
+      - RENDER_METRICS_PATH=/var/log/openmaic/render-metrics.jsonl
+      # 渲染产物根目录（render-service/src/config.ts:119 里 tmpDir 的默认值就是
+      #   /tmp/openmaic-renders）。默认落在容器可写层 ⇒ 任何一次 compose recreate
+      #   都会连成片一起删掉，而 job 状态（job-store 与 LocalDiskArtifactStore 都是
+      #   内存结构）同时清空，查询接口只剩 404 —— 事后无从追回。
+      #
+      # 2026-11-07 实打实吃过一次：job 125c1306 渲了 31 分钟、31268 帧、
+      #   11:40:56 succeeded（metrics 有据），12:09 一次 recreate 后成片蒸发了。
+      # 所以把 tmpDir 移出 /tmp 并挂到宿主 logs/（日志/产物均被 .gitignore 忽略）：
+      #   重建后哪怕接口查不到状态，也能直接从磁盘捞回 per-job 输出目录里的 mp4：
+      #     logs/render-projects/<jobId>/…
+      - PRODUCER_TMP_PROJECT_DIR=/var/lib/openmaic/render-projects
+    volumes:
+      # logs/ 已被 .gitignore 忽略 ⇒ 台账不进 commit。宿主机侧路径：
+      #   logs/render-metrics/render-metrics.jsonl
+      - ./logs/render-metrics:/var/log/openmaic
+      # 渲染中间产物 + 成片，跨重建保留。宿主机侧：logs/render-projects/
+      # 注意会累积（一节课一个目录，几百 MB 量级），定期清理即可。
+      - ./logs/render-projects:/var/lib/openmaic/render-projects
+
+  # 本地中文 TTS shim —— 一个镜像、两个后端
+  #
+  # 为什么有它：Lemonade/Kokoro 的中文是坏的（音素前端错配，详见 .env.local 第 7 节），
+  # 而 Piper 自带中文 G2P、edge-tts 中英混排更好，两者 ASR 实测均正确。
+  # 原 Lemonade 那套（独立 compose + 1.04GB 镜像 + 444MB 模型卷 + 专属网络）
+  # 已于 2026-09-15 全部删除，不再保留。
+  #
+  # 对外契约刻意做成 OpenAI 的 POST /v1/audio/speech —— 于是它们可以在
+  # openmaic.yml 里用 `preset: openai-tts` + 自建 baseUrl 声明（见该文件），
+  # 服务端按 registry 里的 openai-tts 适配器直接调用。
+  # 容器本身对 OpenMAIC 完全无感，不需要任何环境变量来「认领」它。
+  #
+  # 两个服务共用同一镜像、同一 Dockerfile，靠 command 里的 --backend 区分：
+  #   piper-tts:8090  完全离线（22.05kHz WAV）。**可选档，默认不启动**，见下方 profiles
+  #   edge-tts :8091  服务端生成默认（24kHz MP3；需容器能出网到微软端点）
+  #
+  # 构建上下文是 piper-tts/ 子目录（只有 server.py + 60MB 音色），
+  # 避免把上一层的旁白缓存也塞进构建上下文。
+  #
+  # ── 为什么 piper 降为可选档（2026-11-03）────────────────────────────────
+  # 它从来没有被自动调用过。两条生成链路都不做「edge 失败 → piper」的降级：
+  #   · 主链路 POST /api/generate/tts 只取 slots.tts 的那一个 provider，无 failover；
+  #   · agent 链路 scene-tts.ts 的 fallbackCandidates() 只遍历
+  #     enabledServerTTSProviderIds()（读 legacy server-providers.yml + env，
+  #     该文件 2026-11-03 已删 ⇒ 永远是空数组），而且 TTS_PROVIDERS[id]
+  #     会把 custom-* 和 piper 一起过滤掉。
+  # 结果：它此前常驻内存只为了每 30s 答一次 healthcheck。
+  #
+  # 更关键的是它**不适合当兜底**：自带的中文 G2P 会把技术词念错
+  # （实测 `BM25` → 「LM25」、`recall@4` → 「个二三四」）。这种旁白交不出去，
+  # 真出问题时的正确做法是换云 TTS provider，不是退回 piper。
+  #
+  # 所以保留能力、去掉常驻。需要时手动开：
+  #   docker compose --profile tts-fallback up -d piper-tts
+  # 开了之后还要在 openmaic.yml 里手动把 slots.tts 指过来才算生效 ——
+  # 它不会自动接管，这正是上面那段说的意思。
+  piper-tts:
+    <<: *tts-shim
+    container_name: openmaic-piper-tts
+    profiles:
+      - tts-fallback
+    command: ['--backend', 'piper', '--port', '8090']
+    # OpenMAIC 通过 compose 网络用服务名访问；宿主侧只绑回环，便于本地 curl 自测。
+    ports:
+      - '127.0.0.1:8090:8090'
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8090/health',timeout=3).status==200 else 1)
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # 服务端生成默认后端 —— openmaic.yml 的 `slots.tts: edge-tts:edge-tts`。
+  # ⚠️ 没有自动降级：edge 一旦不可用，这套课堂就没有旁白（不会掉到 piper）。
+  # 原因见上方 piper 那段注释。edge-tts 的可用性是这条链路的单点。
+  # edge-tts 走微软 consumer 端点（非官方 API），容器需能解析并连上
+  # speech.platform.bing.com:443。
+  #
+  # 代理：默认仍走本机 Clash（7897），但直连是可用的，代理属可选保险。
+  #   · 2026-09-17：直连间歇性失败（ClientConnectorError，重试 3 次每次 27~47s，
+  #     OpenMAIC 30s 超时先触发 → 课堂 TTS 静默失败），经代理 3/3 稳定，故默认开。
+  #   · 2026-11-03 复测：容器内直连 10/10 成功。当初的失败更像当时网络的问题，
+  #     不是端点本身的稳定性问题。
+  # 客户机器没装 Clash 时，务必把 EDGE_TTS_PROXY 置空（= 直连）：保留一个不存在的
+  # host.docker.internal:7897 会让**所有**出网都超时，比代理本身更致命。
+  # edge-tts 7.x 的 aiohttp 会话是 trust_env=True，容器内设 HTTPS_PROXY 即生效。
+  # NO_PROXY 必须带上 127.0.0.1/localhost —— healthcheck 用 urllib 走本机回环，
+  # 不排除会被代理环境变量劫持导致假死。
+  edge-tts:
+    <<: *tts-shim
+    container_name: openmaic-edge-tts
+    command: ['--backend', 'edge', '--port', '8091', '--edge-voice', 'zh-CN-XiaoxiaoNeural']
+    environment:
+      - HTTPS_PROXY=${EDGE_TTS_PROXY:-http://host.docker.internal:7897}
+      - HTTP_PROXY=${EDGE_TTS_PROXY:-http://host.docker.internal:7897}
+      - NO_PROXY=localhost,127.0.0.1
+    ports:
+      - '127.0.0.1:8091:8091'
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8091/health',timeout=3).status==200 else 1)
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # 阿里云盘交付 sidecar —— 本地私有能力，不属于上游
+  #
+  # 为什么必须独立成容器，而不是在 Next 里直接调 CLI：
+  #   · render-service 默认 RENDER_EGRESS_LOCKDOWN=true，出站被 iptables DROP，
+  #     自己发不出任何请求 ⇒ 上云只能由有出网权限的 Next 侧代劳
+  #   · 阿里云盘官方 OpenAPI 需要人工审核的应用凭据（社区反馈申请两个月无回应），
+  #     所以改用第三方 CLI aliyunpan（走网页端接口）
+  #   · CLI 塞进上游镜像会污染 Dockerfile，独立容器可单独升级、单独重启
+  #
+  # 登录态：宿主执行一次 `aliyunpan login`（扫码），把生成的 aliyunpan_config.json
+  # 放进 .workbuddy/deliver/aliyunpan-config/ 即可。该配置跨平台通用，Linux 容器
+  # 直接可读（已实测）。
+  #
+  # 接口：GET /health · POST /upload · POST /share
+  # 分享一律用 -mode 1（私密，4 位提取码）+ -time 0（永久）：
+  #   -mode 3 是快传，官方语义是「接收方保存后链接失效」，一条链接只能卖一个人
+  #   -mode 1/2 仅支持资源库，所以上传目标盘必须是资源库（cli 输出会写明「目标网盘」）
+  deliver-sidecar:
+    build:
+      context: ./deploy/deliver-sidecar
+      dockerfile: Dockerfile
+    image: openmaic-deliver-sidecar:latest
+    container_name: openmaic-deliver-sidecar
+    restart: unless-stopped
+    environment:
+      - DELIVER_SIDECAR_TOKEN=${DELIVER_SIDECAR_TOKEN:-}
+      - DELIVER_DATA_ROOT=/data
+    volumes:
+      - ./.workbuddy/deliver/aliyunpan-config:/config
+      - ./.workbuddy/deliver/data:/data
+    # 只绑回环，宿主侧 curl 自测用；容器间走服务名，不需要对外暴露
+    ports:
+      - '127.0.0.1:8099:8099'
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://127.0.0.1:8099/health',{headers:{'x-deliver-token':process.env.DELIVER_SIDECAR_TOKEN||''}}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 60s
+      timeout: 35s
+      retries: 3
+      start_period: 15s

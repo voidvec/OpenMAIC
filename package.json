@@ -26,6 +26,7 @@
     "check": "prettier . --check",
     "format": "prettier . --write",
     "test": "vitest run",
+    "test:local": "node scripts/test-local.mjs",
     "test:package-tarballs": "node scripts/smoke-test-package-tarballs.mjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
