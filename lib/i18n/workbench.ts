@@ -139,6 +139,7 @@ export const workbenchEn = {
     },
     title: {
       'build-personal-skill': 'Build a personal Skill',
+      'contest-entry': 'Contest entry pack',
       'curriculum-planner': 'Series planning',
       'zone-of-proximal-development': 'Practice lesson (zone of proximal development)',
       'stage-dsl': 'Classroom document structure',
@@ -494,6 +495,7 @@ export const workbenchZh = {
     },
     title: {
       'build-personal-skill': '创建专属 Skill',
+      'contest-entry': '参赛材料包',
       'curriculum-planner': '系列课规划',
       'zone-of-proximal-development': '习题课（最近发展区）',
       'stage-dsl': '课堂文档结构',
