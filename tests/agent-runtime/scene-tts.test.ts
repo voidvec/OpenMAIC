@@ -4,21 +4,40 @@ const mocks = vi.hoisted(() => ({
   providers: vi.fn(),
   generate: vi.fn(),
   persist: vi.fn(),
+  enabled: vi.fn(),
+  apiKey: vi.fn(),
 }));
 
 vi.mock('@/lib/server/provider-config', () => ({
   resolveTTSModel: vi.fn(() => ''),
   slotTTSModel: vi.fn(() => ''),
+  enabledServerTTSProviderIds: (...args: unknown[]) => mocks.enabled(...args),
+  resolveTTSApiKey: (...args: unknown[]) => mocks.apiKey(...args),
+  resolveTTSBaseUrl: vi.fn(() => undefined),
 }));
 vi.mock('@/lib/server/model-config/media', async (original) => ({
   ...(await original<typeof import('@/lib/server/model-config/media')>()),
   serverMediaConnection: (...args: unknown[]) => mocks.providers(...args),
 }));
 
-vi.mock('@/lib/audio/tts-providers', async (original) => ({
-  ...(await original<typeof import('@/lib/audio/tts-providers')>()),
-  generateTTS: (...args: unknown[]) => mocks.generate(...args),
-}));
+// Spread the real module so the timeout and rate-limit classes the runtime
+// checks with `instanceof` stay real; only the network call is replaced.
+vi.mock('@/lib/audio/tts-providers', async (original) => {
+  const actual = await original<typeof import('@/lib/audio/tts-providers')>();
+  return {
+    ...actual,
+    generateTTS: (...args: unknown[]) => mocks.generate(...args),
+    TTSRequestTimeoutError: class TTSRequestTimeoutError extends Error {
+      constructor(
+        public readonly provider: string,
+        message: string,
+      ) {
+        super(message);
+        this.name = 'TTSRequestTimeoutError';
+      }
+    },
+  };
+});
 
 vi.mock('@/lib/server/classroom-media-bytes', () => ({
   persistClassroomMediaBytes: mocks.persist,
@@ -41,8 +60,24 @@ const scene = {
   actions: [{ id: 'speech-a', type: 'speech', text: 'Hello' }],
 } as Scene;
 
+/** The slot's assignment: an OpenAI TTS provider with a server-held key. */
+function slotConnection(providerId = 'openai-tts') {
+  return {
+    providerId,
+    managed: true,
+    userEndpoint: false,
+    origin: 'configuration',
+    apiKey: 'slot-key',
+  };
+}
+
 describe('scene TTS capability routing', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Only the assigned provider is enabled unless a test says otherwise.
+    mocks.enabled.mockReturnValue([]);
+    mocks.apiKey.mockReturnValue('');
+  });
 
   it('synthesizes nothing when the tts slot is turned off', async () => {
     mocks.providers.mockResolvedValue('off');
@@ -58,12 +93,7 @@ describe('scene TTS capability routing', () => {
   });
 
   it('stores generated narration bytes in classroom media', async () => {
-    mocks.providers.mockResolvedValue({
-      providerId: 'configured-tts',
-      managed: true,
-      userEndpoint: false,
-      origin: 'configuration',
-    });
+    mocks.providers.mockResolvedValue(slotConnection());
     mocks.generate.mockResolvedValue({ audio: new Uint8Array([1, 2]), format: 'mp3' });
     mocks.persist.mockResolvedValue('/api/classroom-media/stage-a/media/tts-speech-a-abc123.mp3');
     const target = structuredClone(scene);
@@ -162,5 +192,144 @@ describe('scene TTS capability routing', () => {
       });
       expect(describeNarrationVoice(summary.voice!)).toContain('the roster has no teacher');
     });
+  });
+
+  it('never speaks through a provider the slot did not assign', async () => {
+    // A second enabled provider must not be consulted when the first answers.
+    mocks.providers.mockResolvedValue(slotConnection());
+    mocks.enabled.mockReturnValue(['openai-tts', 'minimax-tts']);
+    mocks.apiKey.mockReturnValue('legacy-key');
+    mocks.generate.mockResolvedValue({ audio: new Uint8Array([1]), format: 'mp3' });
+    mocks.persist.mockResolvedValue('/api/classroom-media/stage-a/media/tts-speech-a-abc123.mp3');
+
+    await synthesizeSceneNarration({ scene: structuredClone(scene), force: false });
+
+    expect(mocks.generate).toHaveBeenCalledTimes(1);
+    expect(mocks.generate).toHaveBeenCalledWith(
+      expect.objectContaining({ providerId: 'openai-tts', apiKey: 'slot-key' }),
+      'Hello',
+    );
+  });
+
+  it('fails over to another enabled provider when the assignment errors', async () => {
+    mocks.providers.mockResolvedValue(slotConnection());
+    mocks.enabled.mockReturnValue(['openai-tts', 'minimax-tts']);
+    mocks.apiKey.mockReturnValue('legacy-key');
+    // First call (the assignment) errors, second (the fallback) succeeds.
+    mocks.generate
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockResolvedValue({ audio: new Uint8Array([1]), format: 'wav' });
+    mocks.persist.mockResolvedValue('/api/classroom-media/stage-a/media/tts-speech-a-abc123.wav');
+
+    const summary = await synthesizeSceneNarration({ scene: structuredClone(scene), force: false });
+
+    expect(summary).toMatchObject({ available: true, generated: 1, failed: [] });
+    expect(mocks.generate).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ providerId: 'openai-tts' }),
+      'Hello',
+    );
+    expect(mocks.generate).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ providerId: 'minimax-tts' }),
+      'Hello',
+    );
+  });
+
+  it('fails over on a timeout from the assignment instead of wedging', async () => {
+    const { TTSRequestTimeoutError } = await import('@/lib/audio/tts-providers');
+    mocks.providers.mockResolvedValue(slotConnection());
+    mocks.enabled.mockReturnValue(['openai-tts', 'minimax-tts']);
+    mocks.apiKey.mockReturnValue('legacy-key');
+    // A hung upstream must degrade to the next candidate rather than abort the
+    // whole scene.
+    mocks.generate
+      .mockRejectedValueOnce(
+        new TTSRequestTimeoutError('openai-tts', 'TTS request timed out after 30000ms'),
+      )
+      .mockResolvedValue({ audio: new Uint8Array([1]), format: 'wav' });
+    mocks.persist.mockResolvedValue('/api/classroom-media/stage-a/media/tts-speech-a-abc123.wav');
+
+    const summary = await synthesizeSceneNarration({ scene: structuredClone(scene), force: false });
+
+    expect(summary).toMatchObject({ generated: 1, failed: [] });
+    expect(mocks.generate).toHaveBeenCalledTimes(2);
+  });
+
+  it('skips a fallback whose required key is missing', async () => {
+    mocks.providers.mockResolvedValue(slotConnection());
+    mocks.enabled.mockReturnValue(['openai-tts', 'minimax-tts']);
+    // No legacy key for minimax-tts: it is not a usable candidate at all.
+    mocks.apiKey.mockReturnValue('');
+    mocks.generate.mockRejectedValue(new Error('connection refused'));
+
+    const summary = await synthesizeSceneNarration({
+      scene: structuredClone(scene),
+      force: false,
+      // One usable candidate means the slot's own provider gets the retry
+      // budget; skip the backoff so the test does not wait it out.
+      sleep: async () => {},
+    });
+
+    expect(summary).toMatchObject({ available: true, generated: 0 });
+    expect(summary.failed.map((failure) => failure.id)).toEqual(['speech-a']);
+    // The keyless fallback never becomes a candidate: every attempt is the
+    // slot's provider, so nothing is spent trying a provider that cannot answer.
+    expect(mocks.generate).toHaveBeenCalled();
+    expect(
+      mocks.generate.mock.calls.every(
+        ([config]) => (config as { providerId: string }).providerId === 'openai-tts',
+      ),
+    ).toBe(true);
+  });
+
+  it('is sticky: after a failover the next action starts from the winner', async () => {
+    const twoActions = {
+      ...structuredClone(scene),
+      actions: [
+        { id: 'speech-a', type: 'speech', text: 'Hello' },
+        { id: 'speech-b', type: 'speech', text: 'World' },
+      ],
+    } as Scene;
+    mocks.providers.mockResolvedValue(slotConnection());
+    mocks.enabled.mockReturnValue(['openai-tts', 'minimax-tts']);
+    mocks.apiKey.mockReturnValue('legacy-key');
+    mocks.generate
+      .mockRejectedValueOnce(new Error('connection refused'))
+      .mockResolvedValue({ audio: new Uint8Array([1]), format: 'wav' });
+    mocks.persist.mockResolvedValue('/api/classroom-media/stage-a/media/tts-x.wav');
+
+    const summary = await synthesizeSceneNarration({ scene: twoActions, force: false });
+
+    expect(summary.generated).toBe(2);
+    const calls = mocks.generate.mock.calls.map((c) => (c[0] as { providerId: string }).providerId);
+    expect(calls).toEqual(['openai-tts', 'minimax-tts', 'minimax-tts']);
+  });
+
+  it('throws the retryable timeout when every candidate hangs', async () => {
+    const { TTSRequestTimeoutError } = await import('@/lib/audio/tts-providers');
+    mocks.providers.mockResolvedValue(slotConnection());
+    mocks.enabled.mockReturnValue(['openai-tts', 'minimax-tts']);
+    mocks.apiKey.mockReturnValue('legacy-key');
+    mocks.generate.mockRejectedValue(
+      new TTSRequestTimeoutError('openai-tts', 'TTS request timed out after 30000ms'),
+    );
+
+    await expect(
+      synthesizeSceneNarration({ scene: structuredClone(scene), force: false }),
+    ).rejects.toBeInstanceOf(TTSRequestTimeoutError);
+  });
+
+  it('reports unavailable when the assignment lacks its required key', async () => {
+    // A misconfigured assignment is reported as unavailable instead of being
+    // masked by a fallback provider.
+    mocks.providers.mockResolvedValue({ ...slotConnection(), apiKey: undefined });
+    mocks.enabled.mockReturnValue(['openai-tts', 'minimax-tts']);
+    mocks.apiKey.mockReturnValue('legacy-key');
+
+    const summary = await synthesizeSceneNarration({ scene: structuredClone(scene), force: false });
+
+    expect(summary).toMatchObject({ available: false, changed: false, generated: 0 });
+    expect(mocks.generate).not.toHaveBeenCalled();
   });
 });

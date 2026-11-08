@@ -12,6 +12,9 @@ vi.mock('@/lib/server/audio-provider-fetch', () => ({
 vi.mock('@/lib/server/provider-config', () => ({
   resolveTTSModel: vi.fn(() => ''),
   slotTTSModel: vi.fn(() => ''),
+  // Fallback candidates come from the deployment's legacy providers. These
+  // tests exercise the slot's own connection, so there is nothing behind it.
+  enabledServerTTSProviderIds: () => [],
 }));
 vi.mock('@/lib/server/model-config/media', async (original) => ({
   ...(await original<typeof import('@/lib/server/model-config/media')>()),
