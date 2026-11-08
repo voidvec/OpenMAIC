@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   render: vi.fn(),
   zip: vi.fn(),
   subtitles: vi.fn(),
+  setOptions: vi.fn(),
 }));
 vi.mock('@/lib/hooks/use-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('@/lib/video-export-app/use-render-video', () => ({
@@ -16,7 +17,7 @@ vi.mock('@/lib/video-export-app/use-render-video', () => ({
     percent: 0,
     etaMs: null,
     options: { resolution: '1080p', fps: 30, quality: 'standard', burnInSubtitles: false },
-    setOptions: vi.fn(),
+    setOptions: mocks.setOptions,
     renderVideo: mocks.render,
   }),
 }));
@@ -44,6 +45,33 @@ function button(key: string) {
 }
 async function click(key: string) {
   await act(async () => button(key).click());
+}
+/** 交付预设按钮的 textContent 是「标签 + 拼接的参数」，不会和 key 完全相等。 */
+async function clickContaining(key: string) {
+  const found = [...document.querySelectorAll('button')].find((node) =>
+    node.textContent?.includes(key),
+  );
+  expect(found, key).toBeDefined();
+  await act(async () => found!.click());
+}
+function fpsInput(): HTMLInputElement {
+  const found = document.querySelector<HTMLInputElement>(
+    'input[aria-label="export.videoFpsCustom"]',
+  );
+  expect(found, 'custom fps input').not.toBeNull();
+  return found!;
+}
+/** 受控 input 必须走原生 setter，直接改 value React 收不到。 */
+async function typeFps(text: string) {
+  const input = fpsInput();
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+  await act(async () => {
+    setter.call(input, text);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(async () => {
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  });
 }
 function response(accepting?: boolean, enabled = true) {
   return { ok: true, json: async () => ({ enabled, accepting }) };
@@ -128,5 +156,36 @@ describe('video export queue preflight', () => {
     expect(document.body.textContent).not.toContain('export.videoRenderMp4');
     expect(document.body.textContent).toContain('export.videoServiceHint');
     expect(button('export.videoDownloadZip').disabled).toBe(false);
+  });
+});
+
+describe('video export options', () => {
+  it('applies the handover preset in one click', async () => {
+    mocks.fetch.mockResolvedValue(response());
+    await show(true);
+    await clickContaining('export.videoDeliveryPreset');
+    // 一次点齐四个值：漏掉 burnInSubtitles 就是 2026-10-28 那次交付事故。
+    expect(mocks.setOptions).toHaveBeenCalledWith({
+      resolution: '1080p',
+      fps: 30,
+      quality: 'standard',
+      burnInSubtitles: true,
+    });
+  });
+
+  it('accepts a frame rate that is in no preset', async () => {
+    mocks.fetch.mockResolvedValue(response());
+    await show(true);
+    // 25fps 是多个赛区文件里真实出现的值，却不在 24/30/60 这三个预设里。
+    await typeFps('25');
+    expect(mocks.setOptions).toHaveBeenCalledWith({ fps: 25 });
+  });
+
+  it('reverts an out-of-range frame rate instead of submitting it', async () => {
+    mocks.fetch.mockResolvedValue(response());
+    await show(true);
+    await typeFps('500');
+    expect(mocks.setOptions).not.toHaveBeenCalled();
+    expect(fpsInput().value).toBe('30');
   });
 });

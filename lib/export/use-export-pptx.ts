@@ -4,13 +4,20 @@ import { useState, useCallback, useRef } from 'react';
 import pptxgen from 'pptxgenjs';
 import { validateShapeGeometry, RENDER_PATH_LIMITS, shapeToTextFallback } from '@openmaic/geometry';
 import tinycolor from 'tinycolor2';
-import { saveAs } from 'file-saver';
 import { toast } from 'sonner';
+import {
+  resolveSaveTarget,
+  writeSaveTarget,
+  SAVE_DIR_IDS,
+  type SaveTarget,
+} from '@/lib/download/save-target';
 
 import { useStageStore } from '@/lib/store';
+import { useSettingsStore } from '@/lib/store/settings';
 import { useCanvasStore } from '@/lib/store/canvas';
 import { useMediaGenerationStore } from '@/lib/store/media-generation';
 import { useI18n } from '@/lib/hooks/use-i18n';
+import { useBrand } from '@/lib/brand/brand-context';
 import {
   enumerateAssetManifest,
   slideMediaSlotDescriptors,
@@ -26,6 +33,11 @@ import { type SvgPoints, toPoints, getSvgPathRange } from '@/lib/export/svg-path
 import { svg2Base64 } from '@/lib/export/svg2base64';
 import { latexToOmml } from '@/lib/export/latex-to-omml';
 import { inlineMathSource, proseToPlainText } from '@/lib/export/pptx-rich-text';
+import {
+  aigcLabelFontPx,
+  resolveAigcIdentifiers,
+  type AigcIdentifiers,
+} from '@/lib/video-export/aigc-label';
 import { createLogger } from '@/lib/logger';
 import { collectSpeechText } from './narration';
 import { inlineHtmlAssets, createAssetFetcher } from './inline-assets';
@@ -42,6 +54,25 @@ import {
   type PptxDeckEntry,
 } from './pptx-scene-placeholders';
 import { qrPngDataUrl } from './qr-png';
+import { isAigcLabelEnabled } from '@/lib/config/aigc-label-preference';
+import { isOfflineOnlyLinks } from '@/lib/config/export-link-preference';
+import { buildDocxBlob, buildMarkdown, collectSceneScripts } from './use-export-script';
+import {
+  assembleDeliveryBundle,
+  bundleTitle,
+  type DeliverySku,
+  type FormatFile,
+} from './delivery-bundle';
+import { buildFormatSheet, buildRecordingSheet } from './format-sheet';
+import {
+  STANDALONE_PLAYER_STRING_KEYS,
+  type StandalonePlayerStrings,
+} from './standalone-html/contract';
+import { loadRenderedVideo } from '@/lib/device-storage/rendered-video';
+import { advanceDeliveryRevision } from '@/lib/download/delivery-revision';
+import { useVideoRenderStore } from '@/lib/store/video-render';
+import { VIDEO_RESOLUTIONS } from '@/lib/video-export-app/export-options';
+import { listQuizBookletSections, quizBookletPath, renderQuizBooklet } from './quiz-booklet';
 import { classroomPageUrl } from '@/lib/classroom/scene-deep-link';
 import type { AssetUrlLeaseState } from '@/lib/media/use-asset-url';
 import { resolveStoredBytes } from '@/lib/media/resolve-stored-bytes';
@@ -541,6 +572,73 @@ async function qrDataUrlFor(url: string): Promise<string | undefined> {
 // `deck` orders the output in lesson order and inserts placeholder slides for
 // quiz / interactive scenes (see `planPptxDeck`). Without it the PPTX holds the
 // slide scenes only.
+/** The AIGC notices an exported deck must carry: visible label plus identifiers. */
+export interface PptxAigcNotices extends AigcIdentifiers {
+  /** Localized visible label; names the deck as AI-generated. */
+  label: string;
+}
+
+/** Page geometry of one slide, in both the app's px and the deck's inches. */
+interface PptxPageGeometry {
+  viewportSize: number;
+  viewportRatio: number;
+  ratioPx2Inch: number;
+  ratioPx2Pt: number;
+}
+
+/**
+ * Stamp the visible AI-generated label on one slide.
+ *
+ * A deck leaves the app as a distributable copy of generated content, so
+ * 《人工智能生成合成内容标识办法》article 4 applies here exactly as it does to the
+ * MP4: the label sits at a corner and its character height reaches 5% of the
+ * page's shorter side — the floor GB 45438-2025 sets for 图片 (§5.2) and 视频
+ * (§5.4). The two are cited together on purpose: a deck is handed over as a
+ * document, but any single page a customer screenshots and posts is an image,
+ * so the stricter of the two readings is the one that keeps the file defensible.
+ *
+ * The type size is therefore not a style choice: on a 16:9 page it works out to
+ * ~20pt, and anything smaller drops under the standard's floor. What *is* a
+ * style choice is the corner, the box and the ink: the notice is anchored
+ * bottom-right (where the interactive pages put theirs, and where slide content
+ * rarely reaches), set to one tight line instead of a generously leaded one,
+ * and painted mid-grey so it reads as a footer mark rather than a band across
+ * the bottom of the slide.
+ */
+function addPptxAigcLabel(
+  pptxSlide: pptxgen.Slide,
+  notices: PptxAigcNotices,
+  geometry: PptxPageGeometry,
+): void {
+  const { viewportSize, viewportRatio, ratioPx2Inch, ratioPx2Pt } = geometry;
+  const pageWidthPx = viewportSize;
+  const pageHeightPx = viewportSize * viewportRatio;
+  // Font sizes in a deck are points; the geometry constants are px per inch/pt.
+  const fontSizePt = aigcLabelFontPx(pageWidthPx, pageHeightPx) / ratioPx2Pt;
+  const pageWidthIn = pageWidthPx / ratioPx2Inch;
+  const pageHeightIn = pageHeightPx / ratioPx2Inch;
+  const insetIn = pageWidthIn * 0.02;
+  // One line of CJK glyphs needs about 1.05em; 1.15 leaves a hair of air so the
+  // box never clips, without the 1.5 that used to make the strip half again as
+  // tall as the text it holds.
+  const boxHeightIn = (fontSizePt * ratioPx2Pt * 1.15) / ratioPx2Inch;
+  const boxWidthIn = pageWidthIn * 0.45;
+  pptxSlide.addText(notices.label, {
+    // Right-aligned so the text ends at the same inset the interactive pages
+    // use: a right-aligned box in the corner leaves the slide's own bottom-left
+    // (page numbers, source lines) untouched.
+    x: pageWidthIn - boxWidthIn - insetIn,
+    y: pageHeightIn - boxHeightIn - insetIn / 2,
+    w: boxWidthIn,
+    h: boxHeightIn,
+    fontSize: fontSizePt,
+    color: '7F7F7F',
+    align: 'right',
+    valign: 'middle',
+    margin: 0,
+  });
+}
+
 export async function buildPptxBlob(
   slides: Slide[],
   slideScenes: Scene[],
@@ -550,8 +648,22 @@ export async function buildPptxBlob(
   ratioPx2Pt: number,
   stageId?: string,
   deck: readonly PptxDeckEntry[] = slidesOnlyDeck(slides.length),
+  aigc?: PptxAigcNotices,
 ): Promise<Blob> {
   const pptx = new pptxgen();
+  // The hidden half of the notice (§6.1): the provider names itself as the
+  // author/company of the package, and the subject carries the content id.
+  if (aigc) {
+    pptx.author = aigc.provider;
+    pptx.company = aigc.provider;
+    pptx.subject = `${aigc.label} | ${aigc.provider} | ${aigc.contentId}`;
+  }
+  const pageGeometry: PptxPageGeometry = {
+    viewportSize,
+    viewportRatio,
+    ratioPx2Inch,
+    ratioPx2Pt,
+  };
   const documentElements = slides.flatMap((slide) => slide.elements);
   const manifestRefs = derivePptxMediaReferenceSet(slides);
   assertPptxMediaReferenceParity(slides, manifestRefs);
@@ -575,6 +687,8 @@ export async function buildPptxBlob(
 
   const slideNumbers = pptxSlideNumbers(deck, slides);
   const placeholderStyle = placeholderStyleFor(slides);
+  /** Slides the visible AIGC label is stamped on, once every element is placed. */
+  const aigcSlides: pptxgen.Slide[] = [];
 
   for (const entry of deck) {
     const pptxSlide = pptx.addSlide();
@@ -595,6 +709,7 @@ export async function buildPptxBlob(
         { ratioPx2Inch, ratioPx2Pt },
         onlineUrl ? await qrDataUrlFor(onlineUrl) : undefined,
       );
+      if (aigc) aigcSlides.push(pptxSlide);
       continue;
     }
 
@@ -646,6 +761,10 @@ export async function buildPptxBlob(
         };
       }
     }
+
+    // Stamped after the background and the slide's own elements, so neither
+    // the background nor a full-bleed image can cover it.
+    if (aigc) aigcSlides.push(pptxSlide);
 
     if (!slide.elements) continue;
 
@@ -1319,6 +1438,11 @@ export async function buildPptxBlob(
     }
   }
 
+  // Last, so the label is the topmost shape on every page.
+  if (aigc) {
+    for (const pptxSlide of aigcSlides) addPptxAigcLabel(pptxSlide, aigc, pageGeometry);
+  }
+
   return (await pptx.write({ outputType: 'blob' })) as Blob;
 }
 
@@ -1360,6 +1484,12 @@ export async function buildResourcePackZip(
     fileName: string;
     /** Called only when the lesson has PPTX content; produces the PPTX blob. */
     getPptxBlob: () => Promise<Blob>;
+    /**
+     * Produces the quiz booklet, or null when the lesson has no quiz. Called
+     * only when there is something to write, so a quiz-less lesson never pays
+     * for rendering one.
+     */
+    getQuizBooklet?: () => { path: string; html: string } | null;
     /** Whether the PPTX includes placeholder slides (default true). */
     includePlaceholders?: boolean;
     /** Passed through to `inlineHtmlAssets`; tests inject a no-op fetcher. */
@@ -1398,6 +1528,12 @@ export async function buildResourcePackZip(
     zip.file(`${opts.fileName}.pptx`, await pptxBlob.arrayBuffer());
   }
 
+  // 3. Add the quiz booklet. Its questions reach the customer no other way:
+  // a quiz scene has no HTML of its own, and the deck's placeholder slide is
+  // deliberately answer-free.
+  const booklet = opts.getQuizBooklet?.();
+  if (booklet) zip.file(booklet.path, booklet.html);
+
   const blob = await zip.generateAsync({ type: 'blob' });
   return { blob, empty: false, skippedPptx: !hasPptx, failedAssetUrls };
 }
@@ -1422,10 +1558,18 @@ export interface PptxExportChoice {
   includePlaceholders?: boolean;
 }
 
+/**
+ * What the handover is for. Re-exported so callers keep one import path; both
+ * tiers ship the same numbered files, and the difference is the video (teaching
+ * only) versus the opening frame (competition only).
+ */
+export type { DeliverySku };
+
 export function useExportPPTX({ classroomOrigin }: UseExportPPTXOptions = {}) {
   const [exporting, setExporting] = useState(false);
   const exportingRef = useRef(false);
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const brand = useBrand();
 
   const scenes = useStageStore((s) => s.scenes);
   const stage = useStageStore((s) => s.stage);
@@ -1437,6 +1581,25 @@ export function useExportPPTX({ classroomOrigin }: UseExportPPTXOptions = {}) {
 
   const slideScenes = scenes.filter((s) => s.content.type === 'slide');
   const slides = slideScenes.map((s) => (s.content as SlideContent).canvas);
+
+  // Every exported deck carries the AIGC notice unless the operator turned it
+  // off for this deployment: a deck is a distributable copy of generated
+  // content, in the same scope as the exported MP4. The classroom id doubles as
+  // the per-content number (§6.1). `undefined` is what every downstream builder
+  // treats as "no notice", so the switch has exactly one expression per path.
+  const deckAigcNotices = useCallback((): PptxAigcNotices | undefined => {
+    if (!isAigcLabelEnabled()) return undefined;
+    return {
+      label: t('export.aigcLabel'),
+      ...resolveAigcIdentifiers(
+        // §6.1 wants the service provider's name, and a branded deployment is
+        // the provider until the operator names a legal entity explicitly.
+        process.env.NEXT_PUBLIC_AIGC_PROVIDER || brand.productName,
+        process.env.NEXT_PUBLIC_AIGC_CONTENT_ID,
+        stage?.id ?? 'unknown',
+      ),
+    };
+  }, [t, stage?.id, brand.productName]);
 
   // The online classroom page the placeholder slides link to (button + QR
   // code). Anyone with the link can open a classroom, so no status lookup is
@@ -1454,7 +1617,11 @@ export function useExportPPTX({ classroomOrigin }: UseExportPPTXOptions = {}) {
   // an empty lesson itself via `result.empty`. When the guard rejects, callers
   // get a toast instead of silence.
   const withExportGuard = useCallback(
-    (action: () => Promise<void>, hasPptxContent = true) => {
+    (
+      action: (target: SaveTarget) => Promise<void>,
+      hasPptxContent = true,
+      saveId: string = SAVE_DIR_IDS.slides,
+    ) => {
       if (exportingRef.current) return;
       if (!hasPptxContent) {
         toast.warning(t('export.noSlides'));
@@ -1462,17 +1629,35 @@ export function useExportPPTX({ classroomOrigin }: UseExportPPTXOptions = {}) {
       }
       exportingRef.current = true;
       setExporting(true);
-      setTimeout(async () => {
-        try {
-          await action();
-        } catch (err) {
-          log.error('Export failed:', err);
-          toast.error(t('export.exportFailed'));
-        } finally {
+      // The folder picker is opened here, in the caller's task: the
+      // `setTimeout` below (which yields the UI thread so the spinner paints)
+      // would otherwise spend the click's user activation, and the picker
+      // would be refused. Only the heavy work moves off the click's task.
+      void (async () => {
+        const target = await resolveSaveTarget(saveId);
+        if (!target) {
           exportingRef.current = false;
           setExporting(false);
+          return;
         }
-      }, 100);
+        setTimeout(async () => {
+          try {
+            await action(target);
+          } catch (err) {
+            log.error('Export failed:', err);
+            // The bundle fails for reasons the generic sentence cannot express —
+            // two pages that share a name, a pack with no deck — and the
+            // operator is the one who has to fix it. Naming the reason in the
+            // second line beats "export failed" plus a console hunt.
+            toast.error(t('export.exportFailed'), {
+              description: err instanceof Error && err.message ? err.message : undefined,
+            });
+          } finally {
+            exportingRef.current = false;
+            setExporting(false);
+          }
+        }, 100);
+      })();
     },
     [t],
   );
@@ -1481,14 +1666,21 @@ export function useExportPPTX({ classroomOrigin }: UseExportPPTXOptions = {}) {
   const exportPPTX = useCallback(
     ({ includePlaceholders = true }: PptxExportChoice = {}) => {
       withExportGuard(
-        async () => {
+        async (target) => {
           const fileName = stage?.name || 'slides';
           // No Resource Pack next to a standalone PPTX, so placeholders link to
-          // the online classroom only (no offline copy to point at).
+          // the online classroom only (no offline copy to point at). In
+          // offline-only mode they lose that link too: a placeholder slide
+          // that names its scene is still useful, a QR code pointing at a
+          // classroom the reader cannot reach is not. `planPptxDeck` swaps the
+          // sentence above the links for one that sends the reader to whoever
+          // sent the deck — it must not promise a local copy this file cannot
+          // contain.
           const deck = planPptxDeck(scenes, t, {
             linkInteractivePages: false,
             classroomUrl: getClassroomUrl(),
             includePlaceholders,
+            offlineOnlyLinks: isOfflineOnlyLinks(),
           });
           const blob = await buildPptxBlob(
             slides,
@@ -1499,8 +1691,9 @@ export function useExportPPTX({ classroomOrigin }: UseExportPPTXOptions = {}) {
             ratioPx2Pt,
             stage?.id,
             deck,
+            deckAigcNotices(),
           );
-          saveAs(blob, `${fileName}.pptx`);
+          await writeSaveTarget(target, `${fileName}.pptx`, blob);
           toast.success(t('export.exportSuccess'));
         },
         pptxDeckScenes(scenes, { includePlaceholders }).length > 0,
@@ -1518,43 +1711,116 @@ export function useExportPPTX({ classroomOrigin }: UseExportPPTXOptions = {}) {
       ratioPx2Inch,
       ratioPx2Pt,
       t,
+      deckAigcNotices,
     ],
   );
 
-  // ── Export Resource Pack (PPTX + interactive HTML pages as ZIP) ──
+  // ── The pack both exports below start from ──
+  // Written once, from one pass over the scene list: the deck, the interactive
+  // pages and the quiz booklet must never come from two different traversals,
+  // or a quiz could link to a section the booklet does not have.
+  const buildPack = useCallback(
+    (
+      includePlaceholders: boolean,
+      // The pack and the bundle both ship the pages next to the deck, but only
+      // the bundle is built *for a handover*: its reader is someone whose machine
+      // we will never see, so an online button pointing at this operator's
+      // deployment is a dead link and the QR beside it scans into nothing. The
+      // resource pack keeps following the operator's own preference.
+      offlineOnlyLinks = isOfflineOnlyLinks(),
+    ) => {
+      const sharedFetcher = createAssetFetcher({ fetchImpl: createProxiedFetch() });
+      const classroomUrl = getClassroomUrl();
+      return buildResourcePackZip(scenes, {
+        viewportRatio,
+        viewportSize,
+        ratioPx2Inch,
+        ratioPx2Pt,
+        fileName: stage?.name || 'slides',
+        fetcher: sharedFetcher,
+        getPptxBlob: () =>
+          buildPptxBlob(
+            slides,
+            slideScenes,
+            viewportRatio,
+            viewportSize,
+            ratioPx2Inch,
+            ratioPx2Pt,
+            stage?.id,
+            planPptxDeck(scenes, t, {
+              linkInteractivePages: true,
+              classroomUrl,
+              includePlaceholders,
+              // The pack and the bundle both carry the pages next to the deck,
+              // so they can survive without the online classroom at all.
+              offlineOnlyLinks,
+            }),
+            deckAigcNotices(),
+          ),
+        // The booklet is the only copy of a quiz the customer can open offline,
+        // and the deck links to it, so the two must be written from the same
+        // scene list in the same pass.
+        getQuizBooklet: () => {
+          const sections = listQuizBookletSections(scenes);
+          if (sections.length === 0) return null;
+          const notices = deckAigcNotices();
+          return {
+            path: quizBookletPath(t('export.quiz.bookletTitle')),
+            html: renderQuizBooklet({
+              sections,
+              notices: notices ?? null,
+              text: {
+                title: t('export.quiz.bookletTitle'),
+                answerSection: t('export.quiz.answerSection'),
+                questionNumber: t('export.quiz.questionNumber'),
+                questionCount: t('export.quiz.questionCount'),
+                // The booklet reuses the names the player and the quiz editor
+                // already give these concepts.
+                typeLabel: {
+                  single: t('quiz.singleChoice'),
+                  multiple: t('quiz.multipleChoice'),
+                  short_answer: t('quiz.shortAnswer'),
+                },
+                pointsSuffix: t('quiz.pointsSuffix'),
+                answerKey: t('export.htmlPlayer.quizReferenceAnswer'),
+                noAnswer: t('export.htmlPlayer.quizNoReferenceAnswer'),
+                analysis: t('export.htmlPlayer.quizExplanation'),
+                gradingPoints: t('edit.quiz.commentPromptLabel'),
+                aigcLabel: notices?.label ?? '',
+                lang: locale,
+                generator: brand.productName,
+              },
+            }),
+          };
+        },
+        includePlaceholders,
+      });
+    },
+    [
+      scenes,
+      slides,
+      slideScenes,
+      stage,
+      viewportRatio,
+      viewportSize,
+      ratioPx2Inch,
+      ratioPx2Pt,
+      getClassroomUrl,
+      t,
+      locale,
+      brand.productName,
+      deckAigcNotices,
+    ],
+  );
+
+  // ── Export Resource Pack (PPTX + HTML pages + quiz booklet as ZIP) ──
   // No PPTX-content check in the guard: `buildResourcePackZip` reports an
   // empty lesson itself and the hook shows "nothing to export".
   const exportResourcePack = useCallback(
     ({ includePlaceholders = true }: PptxExportChoice = {}) => {
-      withExportGuard(async () => {
+      withExportGuard(async (target) => {
         const fileName = stage?.name || 'slides';
-        const sharedFetcher = createAssetFetcher({ fetchImpl: createProxiedFetch() });
-        const classroomUrl = getClassroomUrl();
-
-        const result = await buildResourcePackZip(scenes, {
-          viewportRatio,
-          viewportSize,
-          ratioPx2Inch,
-          ratioPx2Pt,
-          fileName,
-          fetcher: sharedFetcher,
-          getPptxBlob: () =>
-            buildPptxBlob(
-              slides,
-              slideScenes,
-              viewportRatio,
-              viewportSize,
-              ratioPx2Inch,
-              ratioPx2Pt,
-              stage?.id,
-              planPptxDeck(scenes, t, {
-                linkInteractivePages: true,
-                classroomUrl,
-                includePlaceholders,
-              }),
-            ),
-          includePlaceholders,
-        });
+        const result = await buildPack(includePlaceholders);
 
         if (result.empty) {
           toast.warning(t('export.nothingToExport'));
@@ -1563,7 +1829,7 @@ export function useExportPPTX({ classroomOrigin }: UseExportPPTXOptions = {}) {
         if (result.skippedPptx) {
           toast.info(t('export.noSlidesSkipped'));
         }
-        saveAs(result.blob!, `${fileName}.zip`);
+        await writeSaveTarget(target, `${fileName}.zip`, result.blob!);
         toast.success(t('export.exportSuccess'));
         if (result.failedAssetUrls.length > 0) {
           log.warn(
@@ -1587,20 +1853,273 @@ export function useExportPPTX({ classroomOrigin }: UseExportPPTXOptions = {}) {
         }
       });
     },
-    [
-      withExportGuard,
-      getClassroomUrl,
-      slides,
-      slideScenes,
-      scenes,
-      stage,
-      viewportSize,
-      viewportRatio,
-      ratioPx2Inch,
-      ratioPx2Pt,
-      t,
-    ],
+    [withExportGuard, buildPack, stage, t],
   );
 
-  return { exporting, exportPPTX, exportResourcePack };
+  // ── Export Delivery Bundle (the pack plus script and subtitles, merged) ──
+  // One click, because the alternative is what the operator does today: export
+  // the pack, export the script twice, export the subtitles, then merge them by
+  // hand. The merge needs no server: every part is built from the same stage in
+  // the same tab, so it happens here and the single zip goes straight to the
+  // cloud folder (the save target queues it).
+  const exportDeliveryBundle = useCallback(
+    ({
+      includePlaceholders = true,
+      sku = 'lesson',
+    }: PptxExportChoice & { sku?: DeliverySku } = {}) => {
+      withExportGuard(
+        async (target) => {
+          const fileName = stage?.name || 'slides';
+          // Always relative links here: the reader gets the pages in the same
+          // zip, so a link that resolves inside the folder is strictly better
+          // than a QR code for a server they cannot reach. This is a property of
+          // the bundle, not a preference — a handover must not depend on the
+          // operator remembering to flip a toggle before exporting.
+          const pack = await buildPack(includePlaceholders, true);
+          if (pack.empty) {
+            toast.warning(t('export.nothingToExport'));
+            return;
+          }
+          if (pack.skippedPptx) {
+            toast.info(t('export.noSlidesSkipped'));
+          }
+
+          // The script is text: both formats come from the same collection, so
+          // the .docx and the .md can never disagree about scene order.
+          const scripts = collectSceneScripts(scenes, (order) =>
+            t('export.slideFallback', { order }),
+          );
+          let scriptDocx: Blob | null = null;
+          if (scripts.length > 0) {
+            scriptDocx = await buildDocxBlob(fileName, scripts);
+          }
+          const scriptMarkdown = scripts.length > 0 ? buildMarkdown(fileName, scripts) : null;
+
+          // Subtitles are optional: a lesson whose narration has not been
+          // rendered yet has no timeline to write, and a bundle without the
+          // .srt is still the bundle a customer paid for.
+          let srt: string | null = null;
+          let cueCount = 0;
+          // Where the subtitle timeline ends, which is the only length figure
+          // the submission tier has: it ships no video, but the narration it
+          // will be read aloud against does exist.
+          let narrationSec = 0;
+          // The render options, read once: they are the target frame size the
+          // submission tier's recording brief quotes.
+          const renderOptions = useVideoRenderStore.getState().options;
+          try {
+            // Read, not subscribe: the resolution is only needed once, here, and
+            // a hook would re-render this whole panel on every slider move.
+            const resolution = renderOptions.resolution;
+            const { compileSubtitles } = await import('@/lib/video-export-app/build-export-zip');
+            const compiled = await compileSubtitles({ resolution, locale });
+            cueCount = compiled.cueCount;
+            srt = compiled.cueCount > 0 ? compiled.srt : null;
+            const lastCue = srt
+              ? [...srt.matchAll(/(\d{2}):(\d{2}):(\d{2}),\d{3}\s*-->/g)].pop()
+              : null;
+            if (lastCue) {
+              narrationSec =
+                Number(lastCue[1]) * 3600 + Number(lastCue[2]) * 60 + Number(lastCue[3]);
+            }
+          } catch (error) {
+            log.warn(
+              'Delivery bundle: subtitles could not be compiled; shipping without them.',
+              error,
+            );
+          }
+
+          // The two tiers differ in exactly one place, and it is not cosmetic:
+          // the teaching tier sells a finished video, while the competition tier
+          // is sold *without* one — contest rules put the teacher on camera, and
+          // a render with no human in it fails the first review. Attaching the
+          // video to the competition tier would hand the buyer the one file the
+          // rules say cannot be theirs, so it is not attached at all.
+          const wantsVideo = sku === 'lesson';
+          const rendered = wantsVideo ? await loadRenderedVideo(stage?.id ?? '') : null;
+          if (wantsVideo && !rendered) {
+            // This tier is sold as including the video, so its absence is the
+            // buyer's problem to discover later. Say it now instead. The
+            // competition tier has no video by design and stays quiet.
+            toast.warning(t('export.bundle.noVideo'));
+          }
+
+          // The competition tier's stand-in for a video: the whole classroom as
+          // one narrated HTML file. It is the only item in that order that
+          // *speaks*, and speaking is the part the buyer cannot produce on
+          // their own — they still have to record themselves, so what they get
+          // here is a model of the pacing to talk over, not a performance.
+          //
+          // `format: 'auto'` rather than `'html'`: a lesson carrying a lot of
+          // audio cannot be one file, and the ZIP fallback would put a package
+          // inside the package the customer is already unpacking. When it falls
+          // back, that tier ships without `06` — the per-page folder still
+          // opens, it just does not play narration.
+          let singleHtml: { name: string; data: ArrayBuffer } | null = null;
+          if (!wantsVideo && stage) {
+            try {
+              const { buildStandaloneHtmlExport, classroomUrlFor } =
+                await import('./standalone-html/build-standalone-html');
+              const strings = Object.fromEntries(
+                STANDALONE_PLAYER_STRING_KEYS.map((key) => [key, t(`export.htmlPlayer.${key}`)]),
+              ) as StandalonePlayerStrings;
+              const narrated = await buildStandaloneHtmlExport(stage, scenes, {
+                strings,
+                lang: locale,
+                includeNarration: true,
+                format: 'auto',
+                // Same notice as the MP4: this file leaves the app as a
+                // distributable copy of generated content.
+                aigc: deckAigcNotices(),
+                generator: brand.productName,
+                // Only a PBL scene renders a link back to the online classroom.
+                // Writing this deployment's address into a lesson without one
+                // puts a dead `localhost` link in a file that opens elsewhere.
+                classroomUrl: scenes.some((scene) => scene.content.type === 'pbl')
+                  ? classroomUrlFor(window.location.origin, stage.id)
+                  : undefined,
+              });
+              if (narrated.format === 'html') {
+                singleHtml = {
+                  // The localized suffix (`-带旁白`), so the buyer can tell this
+                  // apart from the silent pages in `交互页面/`.
+                  name: t('export.htmlNarrationSuffix'),
+                  data: await narrated.blob.arrayBuffer(),
+                };
+              } else {
+                log.warn(
+                  'Delivery bundle: the whole-classroom HTML exceeded the single-file limit; shipping without 06.',
+                  { singleFileBytes: narrated.singleFileBytes },
+                );
+              }
+            } catch (error) {
+              log.warn(
+                'Delivery bundle: the whole-classroom HTML could not be built; shipping without 06.',
+                error,
+              );
+            }
+          }
+
+          // Both tiers carry submission paperwork, but it says different things:
+          // a measured sheet for the video that exists, a recording brief for
+          // the video the buyer has to shoot. The opening frame is generated by
+          // the operator's tooling rather than here, so the sheet only names it
+          // when a caller passes one in.
+          const formatFiles: FormatFile[] = [];
+          if (wantsVideo && rendered) {
+            formatFiles.push({
+              name: '报送格式说明.md',
+              data: new TextEncoder().encode(
+                buildFormatSheet({
+                  title: bundleTitle(fileName),
+                  filename: `05_${bundleTitle(fileName)}.mp4`,
+                  bytes: rendered.bytes,
+                  width: rendered.width,
+                  height: rendered.height,
+                  fps: rendered.fps,
+                  durationSec: rendered.durationSec,
+                  quality: rendered.quality,
+                  cues: cueCount,
+                  // The bundle does not generate the opening frame; a caller
+                  // that has one passes it in and flips this to true.
+                  hasIntro: false,
+                }),
+              ),
+            });
+          } else if (!wantsVideo) {
+            const size = VIDEO_RESOLUTIONS[renderOptions.resolution];
+            formatFiles.push({
+              name: '报送格式说明.md',
+              data: new TextEncoder().encode(
+                buildRecordingSheet({
+                  title: bundleTitle(fileName),
+                  width: size.width,
+                  height: size.height,
+                  fps: renderOptions.fps,
+                  narrationSec,
+                  cues: cueCount,
+                  hasIntro: false,
+                }),
+              ),
+            });
+          }
+
+          // The sheet used to say the deck's interactive pages "are index
+          // slides, click one to open it". That described the placeholder deck
+          // and was false for the slides-only deck this export actually writes,
+          // so the sheet now states how many pages there are and that they cost
+          // no slides, instead of describing the deck at all.
+          const interactiveCount = listInteractivePages(scenes).length;
+
+          const blob = await assembleDeliveryBundle({
+            title: fileName,
+            pack: pack.blob!,
+            scriptDocx,
+            scriptMarkdown,
+            srt,
+            // Null on the competition tier: see `wantsVideo`.
+            mp4: wantsVideo ? (rendered?.blob ?? null) : null,
+            // The other half of that trade: the tier with no video gets the
+            // classroom as a playable file instead.
+            singleHtml,
+            // The cover sheet describes what is in the zip, so it is per tier:
+            // the teaching sheet numbers `05` (the video it carries), while the
+            // competition sheet stops at `04` and points at `格式件/` instead. A
+            // lesson whose pages are all interactive or all slides has no
+            // booklet at all — pointing at one the buyer will not find is worse
+            // than saying nothing, so that paragraph is a variable too.
+            usageNote: t(
+              wantsVideo ? 'export.bundle.usageNote' : 'export.bundle.usageNoteContest',
+              {
+                title: fileName,
+                provider: brand.productName,
+                booklet:
+                  listQuizBookletSections(scenes).length > 0 ? t('export.bundle.bookletNote') : '',
+                // The `06` paragraph names a file, so it only appears when that
+                // file is in the zip: the narrated HTML is best-effort, and a
+                // sheet promising a file the customer cannot find is the exact
+                // failure it exists to prevent.
+                player: singleHtml ? t('export.bundle.playerNote') : '',
+                // Same reasoning for the page count: a paragraph is a variable
+                // because a lesson with no interactive scene has no
+                // `交互页面/` to point at.
+                interactive:
+                  interactiveCount > 0
+                    ? t('export.bundle.interactiveNote', { pages: interactiveCount })
+                    : '',
+              },
+            ),
+            pagesDir: t('export.bundle.pagesDir'),
+            usageNoteName: t('export.bundle.usageNoteName'),
+            formatFiles: formatFiles.length > 0 ? formatFiles : undefined,
+          });
+
+          await writeSaveTarget(
+            target,
+            t('export.bundle.fileName', { title: bundleTitle(fileName) }),
+            blob,
+            // The file name carries "-course pack" for the buyer; the cloud
+            // folder must stay the course, or the pack and the deck of the same
+            // lesson end up as two sibling folders in the seller's drive.
+            { deliveryTitle: fileName },
+          );
+          // Only now, after the bytes exist: a build that threw must not consume
+          // a round number, or the buyer's v2 would start at v3. The upload
+          // already read the current number, so this advances the *next* export.
+          //
+          // And only when this round is actually going to the cloud. With
+          // delivery switched off nothing is uploaded, so advancing here would
+          // spend a number the cloud folder never receives — the first round a
+          // customer is sent would then open on `v4/` with `v1`–`v3` empty.
+          if (useSettingsStore.getState().deliverToCloud) advanceDeliveryRevision();
+          toast.success(t('export.exportSuccess'));
+        },
+        true,
+        SAVE_DIR_IDS.classroomZip,
+      );
+    },
+    [withExportGuard, buildPack, scenes, stage, t, locale, brand.productName, deckAigcNotices],
+  );
+
+  return { exporting, exportPPTX, exportResourcePack, exportDeliveryBundle };
 }

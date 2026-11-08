@@ -14,8 +14,9 @@ import {
   AlertDialogFooter,
   AlertDialogCancel,
 } from '@/components/ui/alert-dialog';
-import { Loader2, Trash2, AlertTriangle } from 'lucide-react';
+import { Loader2, Trash2, AlertTriangle, CloudUpload } from 'lucide-react';
 import { useI18n } from '@/lib/hooks/use-i18n';
+import { Switch } from '@/components/ui/switch';
 import {
   clearLocalCache,
   clearLocalStorageKeepingImportState,
@@ -52,6 +53,11 @@ async function clearPersistedStore(persistApi: PersistApi, fallbackName: string)
 
 export function GeneralSettings() {
   const { t } = useI18n();
+
+  // Cloud delivery is a per-machine operator preference: it decides whether the
+  // export you just made also lands in the customer's cloud folder.
+  const deliverToCloud = useSettingsStore((state) => state.deliverToCloud);
+  const setDeliverToCloud = useSettingsStore((state) => state.setDeliverToCloud);
 
   // Clear cache state
   const [showClearDialog, setShowClearDialog] = useState(false);
@@ -103,6 +109,27 @@ export function GeneralSettings() {
     <div className="flex flex-col gap-8">
       {/* Usage statistics dashboard */}
       <UsageDashboard />
+
+      {/* Export delivery */}
+      <div className="rounded-xl border border-border bg-card p-4 space-y-3">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex-1 min-w-0">
+            <p className="flex items-center gap-1.5 text-sm font-medium">
+              <CloudUpload className="w-3.5 h-3.5 text-muted-foreground" />
+              {t('settings.deliverToCloud')}
+            </p>
+            <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+              {t('settings.deliverToCloudDescription')}
+            </p>
+          </div>
+          <Switch checked={deliverToCloud} onCheckedChange={setDeliverToCloud} />
+        </div>
+        {!deliverToCloud && (
+          <p className="text-xs leading-relaxed text-amber-600 dark:text-amber-500">
+            {t('settings.deliverToCloudOffHint')}
+          </p>
+        )}
+      </div>
 
       {/* Danger Zone - Clear Cache */}
       <div className="relative rounded-xl border border-destructive/30 bg-destructive/[0.03] dark:bg-destructive/[0.06] overflow-hidden">

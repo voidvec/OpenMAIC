@@ -4,8 +4,12 @@ import { NextRequest } from 'next/server';
 const mocks = vi.hoisted(() => ({
   proxyFetch: vi.fn(),
   resolveRequestOwnerId: vi.fn(),
+  queueVideoDelivery: vi.fn(),
 }));
 vi.mock('@/lib/server/proxy-fetch', () => ({ proxyFetch: mocks.proxyFetch }));
+vi.mock('@/lib/server/deliver/enqueue', () => ({
+  queueVideoDelivery: mocks.queueVideoDelivery,
+}));
 vi.mock('@/lib/server/identity/resolve', async () =>
   (await import('../helpers/owner-resolution-mock')).ownerResolveModule(
     mocks.resolveRequestOwnerId,
@@ -200,6 +204,45 @@ describe('POST /api/export-video/render', () => {
         }),
       }),
     );
+  });
+
+  it('relays the service job deadline so the client can size its poll budget', async () => {
+    mockOwnerBoundResponse(
+      Response.json({ jobId: 'job-1', deadlineMs: 5_400_000 }, { status: 202 }),
+    );
+    const response = await POST(request());
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ jobId: 'job-1', deadlineMs: 5_400_000 });
+  });
+
+  describe('cloud delivery opt-out', () => {
+    beforeEach(() => mocks.queueVideoDelivery.mockReset());
+
+    it('queues the MP4 for delivery by default', async () => {
+      mockOwnerBoundResponse(Response.json({ jobId: 'job-7' }, { status: 202 }));
+
+      await POST(
+        request({
+          'x-deliver-title': encodeURIComponent('检索调优'),
+          'x-deliver-filename': encodeURIComponent('检索调优.mp4'),
+        }),
+      );
+
+      expect(mocks.queueVideoDelivery).toHaveBeenCalledTimes(1);
+      expect(mocks.queueVideoDelivery).toHaveBeenCalledWith(
+        expect.objectContaining({ jobId: 'job-7', courseTitle: '检索调优' }),
+      );
+    });
+
+    it('skips delivery when the operator switched cloud upload off', async () => {
+      mockOwnerBoundResponse(Response.json({ jobId: 'job-8' }, { status: 202 }));
+
+      const response = await POST(request({ 'x-deliver-cloud': '0' }));
+
+      // The render itself is untouched: only the upload is skipped.
+      expect(response.status).toBe(202);
+      expect(mocks.queueVideoDelivery).not.toHaveBeenCalled();
+    });
   });
 });
 

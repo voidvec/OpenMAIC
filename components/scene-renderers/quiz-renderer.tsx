@@ -5,6 +5,7 @@ import type { QuizContent } from '@/lib/types/stage';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { useI18n } from '@/lib/hooks/use-i18n';
 
 interface QuizRendererProps {
   readonly content: QuizContent;
@@ -13,6 +14,7 @@ interface QuizRendererProps {
 }
 
 export function QuizRenderer({ content, mode, sceneId: _sceneId }: QuizRendererProps) {
+  const { t } = useI18n();
   const [answers, setAnswers] = useState<Record<string, string>>({});
 
   const handleAnswerChange = (questionId: string, answer: string) => {
@@ -22,7 +24,7 @@ export function QuizRenderer({ content, mode, sceneId: _sceneId }: QuizRendererP
   return (
     <div className="w-full h-full overflow-y-auto p-8">
       <div className="max-w-3xl mx-auto space-y-6">
-        <h1 className="text-3xl font-bold">Quiz</h1>
+        <h1 className="text-3xl font-bold">{t('quiz.title')}</h1>
         {content.questions.map((question) => (
           <Card key={question.id}>
             <CardHeader>
@@ -64,7 +66,7 @@ export function QuizRenderer({ content, mode, sceneId: _sceneId }: QuizRendererP
               {question.type === 'short_answer' && (
                 <textarea
                   className="w-full min-h-24 p-2 border rounded"
-                  placeholder="Enter your answer..."
+                  placeholder={t('quiz.inputPlaceholder')}
                   value={answers[question.id] || ''}
                   onChange={(e) => handleAnswerChange(question.id, e.target.value)}
                 />
@@ -74,7 +76,7 @@ export function QuizRenderer({ content, mode, sceneId: _sceneId }: QuizRendererP
         ))}
         {mode === 'autonomous' && (
           <div className="flex justify-end">
-            <Button>Submit Answers</Button>
+            <Button>{t('quiz.submitAnswers')}</Button>
           </div>
         )}
       </div>

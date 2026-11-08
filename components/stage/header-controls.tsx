@@ -7,6 +7,7 @@ import {
   FileCode,
   FileDown,
   Film,
+  GraduationCap,
   Loader2,
   Monitor,
   Moon,
@@ -14,6 +15,7 @@ import {
   Package,
   Settings,
   Sun,
+  Trophy,
 } from 'lucide-react';
 import { Switch } from '@/components/ui/switch';
 import { useI18n } from '@/lib/hooks/use-i18n';
@@ -21,19 +23,27 @@ import { useTheme } from '@/lib/hooks/use-theme';
 import { useStageStore } from '@/lib/store';
 import { useMediaGenerationStore } from '@/lib/store/media-generation';
 import { useExportPPTX } from '@/lib/export/use-export-pptx';
+import type { DeliverySku } from '@/lib/export/use-export-pptx';
 import { useExportClassroom } from '@/lib/export/use-export-classroom';
 import { classroomHasPlaybackMedia, useExportHtml } from '@/lib/export/use-export-html';
 import { isScriptExportReady, useExportScript } from '@/lib/export/use-export-script';
 import { isVideoExportEnabled } from '@/lib/config/feature-flags';
+import { setAigcLabelEnabled, useAigcLabelEnabled } from '@/lib/config/aigc-label-preference';
+import { setOfflineOnlyLinks, useOfflineOnlyLinks } from '@/lib/config/export-link-preference';
+import { currentDeliveryRevision } from '@/lib/download/delivery-revision';
+import { canChooseSaveDirectory } from '@/lib/download/save-target';
 import { useVideoRenderStore } from '@/lib/store/video-render';
 import { CircularProgress } from '@/components/ui/circular-progress';
 import { VideoExportDialog } from './video-export-dialog';
+import { DeliveryOrderDialog } from './delivery-order-dialog';
 import { LanguageSwitcher } from '../language-switcher';
 import { SettingsDialog } from '../settings';
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -123,6 +133,25 @@ export function HeaderControls({
   const { theme, setTheme } = useTheme();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [videoDialogOpen, setVideoDialogOpen] = useState(false);
+  // Snapshot of the round this pack export will land in, captured when the menu
+  // item is chosen so the confirmation names a concrete folder. Nothing between
+  // the click and the confirm can advance the counter, so it stays true.
+  const [bundleConfirmOpen, setBundleConfirmOpen] = useState(false);
+  const [bundleConfirmRevision, setBundleConfirmRevision] = useState(1);
+  // Which tier the confirming dialog will export. Held here rather than passed
+  // through the dialog, so the dialog keeps a single job (explain the round).
+  const [bundleSku, setBundleSku] = useState<DeliverySku>('lesson');
+
+  /**
+   * Snapshot the round at click time, not at confirm time: the dialog explains
+   * which `v<n>/` this export will land in, and the operator may spend a minute
+   * reading it.
+   */
+  const openBundleConfirm = (sku: DeliverySku) => {
+    setBundleSku(sku);
+    setBundleConfirmRevision(currentDeliveryRevision());
+    setBundleConfirmOpen(true);
+  };
 
   // Export plumbing — uses the stage / media task stores to check
   // readiness, then hands off to the export hooks. Available in both
@@ -133,7 +162,23 @@ export function HeaderControls({
   const generatingOutlines = useStageStore((s) => s.generatingOutlines);
   const failedOutlines = useStageStore((s) => s.failedOutlines);
   const mediaTasks = useMediaGenerationStore((s) => s.tasks);
-  const { exporting: isExporting, exportPPTX, exportResourcePack } = useExportPPTX();
+  const {
+    exporting: isExporting,
+    exportPPTX,
+    exportResourcePack,
+    exportDeliveryBundle,
+  } = useExportPPTX();
+  // The AI-generated notice is a legal obligation (《人工智能生成合成内容标识办法》
+  // art. 4), so it is on unless the operator turns it off once for an order
+  // where the customer carries the notice themselves. Read here rather than per
+  // export kind: every item below must follow the same switch.
+  const aigcLabelEnabled = useAigcLabelEnabled();
+  // Placeholder slides can reach their scene two ways, and they fail in
+  // opposite places: the QR code needs a deployment the reader can reach, the
+  // relative path needs the pages shipped next to the deck. Same scope as the
+  // notice — one switch for every item below, because a handover that mixes
+  // both kinds of link is a handover where half the links do not open.
+  const offlineOnlyLinks = useOfflineOnlyLinks();
   const { exporting: isExportingZip, exportClassroomZip } = useExportClassroom();
   const { exporting: isExportingHtml, exportStandaloneHtml } = useExportHtml();
   const { exporting: isExportingScript, exportScriptDocx, exportScriptMd } = useExportScript();
@@ -334,6 +379,42 @@ export function HeaderControls({
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" sideOffset={8} className="min-w-[240px]">
+          {/* The one export a customer handover needs: deck, pages, booklet,
+              script, subtitles and the finished video in a single numbered zip.
+              Two tiers because the buyer differs: a teacher opens it to press
+              play, a contest reviewer also wants the submission paperwork. Both
+              advance the version counter, so this stays the last export of a
+              round (see the dialog for why). */}
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger
+              disabled={!canExport || isExporting}
+              className="cursor-pointer gap-2.5"
+            >
+              <Package className="w-4 h-4 text-gray-400 shrink-0" aria-hidden="true" />
+              <span>{t('export.bundle.menuLabel')}</span>
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="min-w-[260px]">
+              <ExportMenuItem
+                disabled={!canExport || isExporting}
+                onSelect={() => openBundleConfirm('lesson')}
+                icon={
+                  <GraduationCap
+                    className="w-4 h-4 text-gray-400 shrink-0"
+                    aria-hidden="true"
+                  />
+                }
+                label={t('export.bundle.lessonLabel')}
+                description={t('export.bundle.lessonDesc')}
+              />
+              <ExportMenuItem
+                disabled={!canExport || isExporting}
+                onSelect={() => openBundleConfirm('contest')}
+                icon={<Trophy className="w-4 h-4 text-gray-400 shrink-0" aria-hidden="true" />}
+                label={t('export.bundle.contestLabel')}
+                description={t('export.bundle.contestDesc')}
+              />
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
           {/* PPTX and Resource Pack: choose per export whether quiz,
               interactive and PBL scenes get placeholder slides. */}
           <DropdownMenuSub>
@@ -486,10 +567,60 @@ export function HeaderControls({
               description={t('export.videoDesc')}
             />
           )}
+          {/* Both switches scope what an export stamps rather than which export
+              runs, so they sit below the export items instead of above them: a
+              reader who opened this menu to export should not have to step past
+              settings first. One switch covers every item above — the notice is
+              stamped by the PPTX, HTML, booklet and video builders alike, so a
+              per-format toggle would let a handover end up half-labelled, and
+              the same holds for which kind of link the placeholder slides
+              carry. */}
+          <DropdownMenuSeparator />
+          <DropdownMenuCheckboxItem
+            checked={aigcLabelEnabled}
+            onCheckedChange={(checked) => setAigcLabelEnabled(checked === true)}
+            className="items-start gap-2"
+          >
+            <div>
+              <div>{t('export.aigcLabelToggle')}</div>
+              <div className="text-[11px] leading-snug text-gray-400 dark:text-gray-500">
+                {t('export.aigcLabelToggleDesc')}
+              </div>
+            </div>
+          </DropdownMenuCheckboxItem>
+          <DropdownMenuCheckboxItem
+            checked={offlineOnlyLinks}
+            onCheckedChange={(checked) => setOfflineOnlyLinks(checked === true)}
+            className="items-start gap-2"
+          >
+            <div>
+              <div>{t('export.offlineLinksToggle')}</div>
+              <div className="text-[11px] leading-snug text-gray-400 dark:text-gray-500">
+                {t('export.offlineLinksToggleDesc')}
+              </div>
+            </div>
+          </DropdownMenuCheckboxItem>
+          {/* Chromium refuses to grant write access to the well-known folders
+              themselves (Downloads, Documents, Desktop, the home directory) and
+              says they "contain system files", which reads like a fault in this
+              app. Sub-folders are allowed, so the fix is one line of guidance
+              shown only where the folder chooser exists. */}
+          {canChooseSaveDirectory() && (
+            <p className="px-2 py-1.5 text-[11px] leading-relaxed text-gray-400 dark:text-gray-500">
+              {t('export.saveFolderHint')}
+            </p>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <DeliveryOrderDialog
+        open={bundleConfirmOpen}
+        onOpenChange={setBundleConfirmOpen}
+        revision={bundleConfirmRevision}
+        sku={bundleSku}
+        onConfirm={() => exportDeliveryBundle({ includePlaceholders: true, sku: bundleSku })}
+      />
       {videoExportEnabled && (
         <VideoExportDialog open={videoDialogOpen} onOpenChange={setVideoDialogOpen} />
       )}

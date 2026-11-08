@@ -4,6 +4,7 @@ import type { Slide } from '@openmaic/dsl';
 import type { PBLContent, Scene } from '@/lib/types/stage';
 import { classroomSceneUrl } from '@/lib/classroom/scene-deep-link';
 import { pblBriefing, type PblBriefing } from './pbl-briefing';
+import { listQuizBookletSections, quizBookletPath } from './quiz-booklet';
 
 // ── Interactive page naming (shared by the Resource Pack ZIP and PPTX links) ──
 
@@ -84,9 +85,11 @@ export interface ScenePlaceholder {
   online?: { url: string; label: string };
   /**
    * The scene's page in the Resource Pack. `target` is the URI-encoded
-   * relative link; `path` is the readable pack path.
+   * relative link; `path` is the readable pack path. `showPath` prints that
+   * path where the hint would go — set when the online button is left out, so
+   * the slide still says which file to open.
    */
-  offline?: { label: string; hint: string; target: string; path: string };
+  offline?: { label: string; hint: string; target: string; path: string; showPath?: boolean };
   /** Plain line above `meta`, e.g. a PBL project's goal. */
   lead?: string;
   /** Bold summary line, e.g. the quiz question or PBL milestone count. */
@@ -109,7 +112,8 @@ export type PptxDeckEntry =
 export interface PlanPptxDeckOptions {
   /**
    * True only when the PPTX ships inside the Resource Pack: a relative link
-   * from a standalone PPTX would point at nothing.
+   * from a standalone PPTX would point at nothing. It covers every sibling the
+   * pack ships next to the deck — the interactive pages and the quiz booklet.
    */
   linkInteractivePages: boolean;
   /**
@@ -122,6 +126,13 @@ export interface PlanPptxDeckOptions {
    * default). When false the PPTX holds the slide scenes only.
    */
   includePlaceholders?: boolean;
+  /**
+   * Leave the online classroom out of the placeholders: no button, no QR code,
+   * and the relative path printed where the hint would be. For a handover the
+   * reader opens on a machine that cannot reach this deployment — the QR code
+   * would resolve to nothing, but the path next to the exported files does.
+   */
+  offlineOnlyLinks?: boolean;
 }
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
@@ -250,14 +261,28 @@ export function pptxDeckScenes(
 export function planPptxDeck(
   scenes: readonly Scene[],
   t: Translate,
-  { linkInteractivePages, classroomUrl, includePlaceholders = true }: PlanPptxDeckOptions,
+  {
+    linkInteractivePages,
+    classroomUrl,
+    includePlaceholders = true,
+    offlineOnlyLinks = false,
+  }: PlanPptxDeckOptions,
 ): PptxDeckEntry[] {
   const pagePaths = new Map(listInteractivePages(scenes).map((p) => [p.scene, p.path]));
+  // The quiz booklet is one file for the whole lesson, so a quiz's link is a
+  // path plus the anchor of its own section.
+  const quizAnchors = new Map(
+    listQuizBookletSections(scenes).map((section) => [section.scene, section.id]),
+  );
+  const quizPath = linkInteractivePages ? quizBookletPath(t('export.quiz.bookletTitle')) : '';
   const deck: PptxDeckEntry[] = [];
   let slideIndex = 0;
 
+  // A QR code of a relative path is unreadable by a phone, and the online
+  // button beside it would open a deployment the reader may not be able to
+  // reach. Offline-only mode drops both rather than shipping links that fail.
   const onlineLink = (scene: Scene): ScenePlaceholder['online'] =>
-    classroomUrl
+    classroomUrl && !offlineOnlyLinks
       ? {
           url: classroomSceneUrl(classroomUrl, scene.id),
           label: t('export.placeholder.openOnline'),
@@ -274,6 +299,12 @@ export function planPptxDeck(
       // No pack page: link the scene's own url, made absolute for the QR code.
       const liveUrl = path ? undefined : absoluteSceneUrl(content.url, classroomUrl);
       const typeLabel = t('export.placeholder.interactiveLabel');
+      const online = liveUrl
+        ? { url: liveUrl, label: t('export.placeholder.openOnline') }
+        : onlineLink(scene);
+      // Only the pack ships the page, so only the pack can promise an offline
+      // copy. A url-only scene has no file beside the deck to point at.
+      const offlinePath = path && linkInteractivePages ? path : undefined;
       deck.push({
         kind: 'placeholder',
         placeholder: {
@@ -281,19 +312,27 @@ export function planPptxDeck(
           sceneType: 'interactive',
           typeLabel,
           title: title || typeLabel,
-          description: t('export.placeholder.interactiveDesc'),
-          online: liveUrl
-            ? { url: liveUrl, label: t('export.placeholder.openOnline') }
-            : onlineLink(scene),
-          offline:
-            path && linkInteractivePages
-              ? {
-                  label: t('export.placeholder.openOffline'),
-                  hint: t('export.placeholder.offlineHint'),
-                  target: relativeHyperlinkTarget(path),
-                  path,
-                }
-              : undefined,
+          // The description has to agree with what is actually on the slide:
+          // promising a button and a QR code on a page that carries neither is
+          // how a handover ends up looking broken to the reader. Between the two
+          // offline cases only the pack can keep that promise. A standalone deck
+          // ships no page at all, so without the online button there is nothing
+          // to point at and the sentence says where the page has to come from.
+          description: online
+            ? t('export.placeholder.interactiveDesc')
+            : offlinePath
+              ? t('export.placeholder.interactiveDescOffline')
+              : t('export.placeholder.interactiveDescNoPage'),
+          online,
+          offline: offlinePath
+            ? {
+                label: t('export.placeholder.openOffline'),
+                hint: t('export.placeholder.offlineHint'),
+                target: relativeHyperlinkTarget(offlinePath),
+                path: offlinePath,
+                showPath: offlineOnlyLinks,
+              }
+            : undefined,
         },
       });
     } else if (content.type === 'quiz') {
@@ -304,6 +343,11 @@ export function planPptxDeck(
         .map((q) => truncate(q.question ?? '', MAX_QUIZ_ITEM_LENGTH))
         .filter(Boolean);
       if (questions.length > MAX_QUIZ_ITEMS) items.push('…');
+      // The deck never carries answers, so a quiz without a booklet is a page
+      // of questions with nowhere to check them. Inside the Resource Pack the
+      // placeholder therefore links to the booklet's section instead of relying
+      // on the online classroom alone.
+      const anchor = quizAnchors.get(scene);
       deck.push({
         kind: 'placeholder',
         placeholder: {
@@ -311,8 +355,20 @@ export function planPptxDeck(
           sceneType: 'quiz',
           typeLabel,
           title: title || typeLabel,
-          description: t('export.placeholder.quizDesc'),
+          description: quizPath
+            ? t('export.placeholder.quizDescOffline')
+            : t('export.placeholder.quizDesc'),
           online: onlineLink(scene),
+          offline:
+            quizPath && anchor
+              ? {
+                  label: t('export.placeholder.openQuizOffline'),
+                  hint: t('export.placeholder.quizOfflineHint'),
+                  target: `${relativeHyperlinkTarget(quizPath)}#${anchor}`,
+                  path: quizPath,
+                  showPath: offlineOnlyLinks,
+                }
+              : undefined,
           meta: t('export.placeholder.quizQuestionCount', { count: questions.length }),
           items,
         },
@@ -331,6 +387,7 @@ export function planPptxDeck(
         .map((milestone) => truncateToWidth(asText(milestone.title), MAX_PBL_MILESTONE_WIDTH))
         .filter(Boolean);
       // No "…" line for more milestones: the count above says how many.
+      const online = onlineLink(scene);
       deck.push({
         kind: 'placeholder',
         placeholder: {
@@ -338,8 +395,13 @@ export function planPptxDeck(
           sceneType: 'pbl',
           typeLabel,
           title: title || truncate(asText(briefing?.title), MAX_TITLE_LENGTH) || typeLabel,
-          description: t('export.placeholder.pblDesc'),
-          online: onlineLink(scene),
+          // A PBL scene has no page in the pack, so without the online button
+          // the slide is the briefing itself and nothing else. Say that rather
+          // than pointing at a button that is not there.
+          description: online
+            ? t('export.placeholder.pblDesc')
+            : t('export.placeholder.pblDescOffline'),
+          online,
           lead: goal
             ? t('export.placeholder.pblGoal', { goal: truncateToWidth(goal, MAX_PBL_GOAL_WIDTH) })
             : undefined,
@@ -656,13 +718,23 @@ export function renderScenePlaceholder(
       w: inch(width),
       h: inch(28 * u),
     };
+    // The path rides in its own run so it stays one `<a:t>` node: the delivery
+    // bundle rewrites that exact text when it moves the pages into its folder.
+    // Without the online button the hint ("points at the same file in the
+    // pack") explains nothing a reader can act on, while the path does.
+    const detail = offline.showPath
+      ? [{ text: ' · ' }, { text: offline.path }]
+      : [{ text: ` · ${offline.hint}` }];
     pptxSlide.addText(
       [
         {
           text: offline.label,
           options: { hyperlink, color: style.accent, bold: true, fontFace: style.fontName },
         },
-        { text: ` · ${offline.hint}`, options: { color: style.fontColor } },
+        ...detail.map((run) => ({
+          text: run.text,
+          options: { hyperlink, color: style.fontColor },
+        })),
       ],
       {
         ...line,
@@ -670,6 +742,9 @@ export function renderScenePlaceholder(
         fontSize: pt(14 * u),
         margin: 0,
         valign: 'middle',
+        // A scene title is not length-limited, so the printed path can outrun
+        // the column; shrinking beats spilling over the slide edge.
+        fit: 'shrink',
       },
     );
     addLinkHotspot(pptxSlide, line, hyperlink);

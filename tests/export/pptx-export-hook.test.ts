@@ -41,6 +41,12 @@ vi.mock('@/lib/store/canvas', () => ({
   useCanvasStore: { use: { viewportSize: () => 1000, viewportRatio: () => 0.5625 } },
 }));
 vi.mock('@/lib/hooks/use-i18n', () => ({ useI18n: () => ({ t: translate }) }));
+// This file calls the hook outside a renderer, so every React hook it reaches is
+// stubbed above; `useBrand` would otherwise reach the real `useContext`.
+vi.mock('@/lib/brand/brand-context', async () => {
+  const { DEFAULT_BRAND } = await import('@/lib/brand/brand-config');
+  return { useBrand: () => DEFAULT_BRAND };
+});
 vi.mock('@/lib/device-storage/database', () => ({
   mediaFileKey: (stageId: string, ref: string) => `${stageId}:${ref}`,
   db: { mediaFiles: { get: vi.fn().mockResolvedValue(undefined) } },
@@ -80,8 +86,17 @@ const sceneUrl = (id: string) => `${ORIGIN}/classroom/stage-1?scene=${id}`;
 async function savedPptx(): Promise<JSZip> {
   const blob = mocks.saveAs.mock.calls.at(-1)![0] as Blob;
   const zip = await JSZip.loadAsync(await blob.arrayBuffer());
-  const inner = zip.file('Course.pptx');
+  // A standalone PPTX is the saved blob itself; a resource pack and a delivery
+  // bundle wrap it under names of their own (`Course.pptx`, `01_Course.pptx`),
+  // so pick whichever member is a deck instead of a fixed name.
+  const inner = zip.file(/\.pptx$/i)[0];
   return inner ? JSZip.loadAsync(await inner.async('uint8array')) : zip;
+}
+
+/** The saved blob as-is, for reading the delivery bundle's own members. */
+async function savedBundle(): Promise<JSZip> {
+  const blob = mocks.saveAs.mock.calls.at(-1)![0] as Blob;
+  return JSZip.loadAsync(await blob.arrayBuffer());
 }
 
 async function runExport(action: () => void) {
@@ -135,6 +150,64 @@ describe('useExportPPTX placeholders', () => {
     });
   }
 
+  // A bundle ships the pages inside the same zip, so a link to this operator's
+  // deployment is strictly worse than a relative one: it dead-ends on any other
+  // machine. This is a property of the bundle, not a preference — a handover must
+  // not depend on the operator remembering to flip the toggle before exporting.
+  it('keeps a delivery bundle offline even when placeholders are on', async () => {
+    const hook = useExportPPTX({ classroomOrigin: ORIGIN });
+    await runExport(() => hook.exportDeliveryBundle({ includePlaceholders: true }));
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const pptx = await savedPptx();
+    const pagesDir = translate('export.bundle.pagesDir');
+    for (const slideNumber of [2, 3]) {
+      const xml = await pptx.file(`ppt/slides/slide${slideNumber}.xml`)!.async('string');
+      const rels = await pptx
+        .file(`ppt/slides/_rels/slide${slideNumber}.xml.rels`)!
+        .async('string');
+      // No online button, no QR pointing at us, and the printed path is the
+      // folder the bundle actually created.
+      expect(rels).not.toContain(ORIGIN);
+      expect(xml).not.toContain(ORIGIN);
+      expect(xml).not.toContain(translate('export.placeholder.openOnline'));
+      expect(xml).toContain(`${pagesDir}/`);
+    }
+  });
+
+  // The sheet used to say the interactive pages "are index slides, click one to
+  // open it". The delivery bundle writes a slides-only deck (a placeholder slide
+  // would carry a `localhost` QR code, i.e. a dead link on the buyer's machine),
+  // so that sentence described slides the buyer never receives. The sheet now
+  // states how many pages sit outside the deck instead.
+  it('counts the interactive pages on the delivery sheet instead of promising index slides', async () => {
+    const hook = useExportPPTX({ classroomOrigin: ORIGIN });
+    await runExport(() => hook.exportDeliveryBundle({ includePlaceholders: true }));
+
+    const zip = await savedBundle();
+    const note = await zip.file(translate('export.bundle.usageNoteName'))!.async('string');
+    expect(note).toContain(translate('export.bundle.interactiveNote', { pages: 1 }).trim());
+    expect(note).not.toMatch(/index slide|index pages/i);
+  });
+
+  // A lesson with no interactive scene ships no `pages/` directory, so the
+  // paragraph would point at something the buyer cannot find.
+  it('drops the page-count paragraph when the lesson has no interactive scene', async () => {
+    mocks.stageState.scenes = [
+      scene('s1', 'slide', { type: 'slide', canvas }),
+      scene('q1', 'quiz', {
+        type: 'quiz',
+        questions: [{ id: 'a', type: 'single', question: 'Which planet is largest?' }],
+      }),
+    ];
+    const hook = useExportPPTX({ classroomOrigin: ORIGIN });
+    await runExport(() => hook.exportDeliveryBundle({ includePlaceholders: true }));
+
+    const zip = await savedBundle();
+    const note = await zip.file(translate('export.bundle.usageNoteName'))!.async('string');
+    expect(note).not.toContain('Interactive pages outside the deck');
+  });
+
   it('leaves the online link out when the stage has no id', async () => {
     mocks.stageState.stage = { name: 'Course' };
     const hook = useExportPPTX({ classroomOrigin: ORIGIN });
@@ -174,6 +247,11 @@ describe('useExportPPTX placeholders', () => {
     const blob = mocks.saveAs.mock.calls.at(-1)![0] as Blob;
     const zip = await JSZip.loadAsync(await blob.arrayBuffer());
     const files = Object.keys(zip.files).filter((n) => !zip.files[n].dir);
-    expect(files).toEqual(['interactive/01_Scene i1.html']);
+    // The quiz has no HTML of its own, so it ships as the booklet instead: the
+    // pack drops slides, not the questions.
+    expect(files).toEqual([
+      'interactive/01_Scene i1.html',
+      `quiz/${translate('export.quiz.bookletTitle')}.html`,
+    ]);
   });
 });

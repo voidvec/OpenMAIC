@@ -34,7 +34,11 @@ import { useExportVideo } from '@/lib/video-export-app/use-export-video';
 import { useRenderVideo } from '@/lib/video-export-app/use-render-video';
 import { useDownloadSubtitles } from '@/lib/video-export-app/use-download-subtitles';
 import {
+  DELIVERY_PRESET,
+  isRenderableFps,
   VIDEO_FPS,
+  VIDEO_FPS_MAX,
+  VIDEO_FPS_MIN,
   VIDEO_QUALITIES,
   VIDEO_RESOLUTIONS,
   type VideoResolution,
@@ -93,6 +97,123 @@ function OptionRow<T extends string | number>({
   );
 }
 
+/**
+ * The typed frame-rate field.
+ *
+ * Split into its own component and re-mounted via `key` so an externally changed
+ * value (a preset click, or the handover-preset button) resets the draft without
+ * a state-syncing effect — calling setState from an effect is the cascading
+ * render the lint rule refuses, and remounting is cheaper than reconciling it.
+ */
+function FpsInput({
+  value,
+  onCommit,
+  disabled,
+  placeholder,
+  className,
+}: {
+  value: number;
+  onCommit: (v: number) => void;
+  disabled?: boolean;
+  placeholder: string;
+  className: string;
+}) {
+  const [draft, setDraft] = useState(String(value));
+  const commit = () => {
+    const parsed = Number.parseInt(draft, 10);
+    if (isRenderableFps(parsed)) onCommit(parsed);
+    else setDraft(String(value)); // out of range: revert, do not submit
+  };
+  return (
+    <input
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        // Enter commits directly instead of relying on blur: the value must not
+        // depend on where focus goes next, and a blur round-trip is awkward to
+        // drive from a test.
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          commit();
+        }
+        if (event.key === 'Escape') setDraft(String(value));
+      }}
+      disabled={disabled}
+      inputMode="numeric"
+      placeholder={placeholder}
+      aria-label={placeholder}
+      className={className}
+    />
+  );
+}
+
+/**
+ * Frame rate: presets plus free entry.
+ *
+ * The presets cover the usual cases; the field exists because submission specs
+ * name rates that are in no menu (25fps is the PAL legacy several provincial
+ * education bureaus still require). The typed value is validated on commit, not
+ * per keystroke, so typing "25" does not briefly submit "2"; an out-of-range
+ * entry reverts to the last good value instead of failing a long render.
+ */
+function FpsRow({
+  label,
+  value,
+  onChange,
+  disabled,
+  customLabel,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+  disabled?: boolean;
+  customLabel: string;
+}) {
+  const isCustom = !VIDEO_FPS.includes(value as (typeof VIDEO_FPS)[number]);
+  const buttonClass = (active: boolean) =>
+    cn(
+      'flex-1 px-2 py-1.5 text-xs rounded-md border transition-colors disabled:opacity-50',
+      active
+        ? 'border-primary bg-primary/10 text-primary'
+        : 'border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700',
+    );
+
+  return (
+    <div>
+      <div className="text-[11px] text-gray-400 dark:text-gray-500 mb-1">
+        {label}
+        <span className="ml-1 opacity-70">
+          ({VIDEO_FPS_MIN}–{VIDEO_FPS_MAX})
+        </span>
+      </div>
+      <div className="flex gap-1.5">
+        {VIDEO_FPS.map((opt) => (
+          <button
+            key={opt}
+            onClick={() => onChange(opt)}
+            disabled={disabled}
+            className={buttonClass(opt === value)}
+          >
+            {opt}
+          </button>
+        ))}
+        <FpsInput
+          key={value}
+          value={value}
+          onCommit={onChange}
+          disabled={disabled}
+          placeholder={customLabel}
+          className={cn(
+            'w-16 shrink-0 px-2 py-1.5 text-xs text-center rounded-md border bg-transparent transition-colors disabled:opacity-50',
+            isCustom ? 'border-primary text-primary' : 'border-gray-200 dark:border-gray-700',
+          )}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function VideoExportDialog({
   open,
   onOpenChange,
@@ -102,7 +223,8 @@ export function VideoExportDialog({
 }) {
   const { t } = useI18n();
   const { exporting: isExportingVideo, exportVideo } = useExportVideo();
-  const { rendering, percent, etaMs, options, setOptions, renderVideo } = useRenderVideo();
+  const { rendering, percent, etaMs, lastElapsedMs, options, setOptions, renderVideo } =
+    useRenderVideo();
   const { downloading, downloadSubtitles } = useDownloadSubtitles();
   const { resolution, fps, quality, burnInSubtitles } = options;
   // undefined = unknown (still probing); true/false = capability answer.
@@ -160,6 +282,20 @@ export function VideoExportDialog({
 
         <div className="flex flex-col gap-4">
           {/* Output settings */}
+          {/* Handover preset: one click sets the four values that together make a
+              deliverable master. Captions are in the set precisely because that
+              is the one that has been forgotten in production. */}
+          <button
+            onClick={() => setOptions({ ...DELIVERY_PRESET })}
+            disabled={busy}
+            className="flex flex-wrap items-center justify-center gap-1 rounded-md border border-dashed border-primary/40 bg-primary/5 px-2 py-1.5 text-[11px] text-primary transition-colors hover:bg-primary/10 disabled:opacity-50"
+          >
+            <span className="font-medium">{t('export.videoDeliveryPreset')}</span>
+            <span className="opacity-80">
+              {DELIVERY_PRESET.resolution} · {DELIVERY_PRESET.fps}fps ·{' '}
+              {t('export.videoQuality_standard')} · {t('export.videoBurnSubtitles')}
+            </span>
+          </button>
           <OptionRow
             label={t('export.videoResolution')}
             options={RESOLUTIONS}
@@ -170,12 +306,12 @@ export function VideoExportDialog({
           />
           {serviceEnabled && (
             <>
-              <OptionRow
+              <FpsRow
                 label={t('export.videoFps')}
-                options={VIDEO_FPS}
                 value={fps}
                 onChange={(fps) => setOptions({ fps })}
                 disabled={busy}
+                customLabel={t('export.videoFpsCustom')}
               />
               <OptionRow
                 label={t('export.videoQuality')}
@@ -229,6 +365,14 @@ export function VideoExportDialog({
                     })
                   : t('export.videoProgress', { percent })}
               </div>
+            </div>
+          )}
+
+          {/* Last export cost — makes an fps/quality change comparable instead of
+              a guess. The render service keeps the durable per-run record. */}
+          {!rendering && lastElapsedMs != null && (
+            <div className="text-[11px] text-gray-400 dark:text-gray-500">
+              {t('export.videoLastExport', { duration: formatRemaining(lastElapsedMs, t) })}
             </div>
           )}
 

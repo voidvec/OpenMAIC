@@ -9,6 +9,8 @@ import {
 } from '@/lib/server/render-service';
 import { capBodyStream } from '@/lib/server/capped-stream';
 import { clientIdentity } from '@/lib/server/client-identity';
+import { queueVideoDelivery } from '@/lib/server/deliver/enqueue';
+import { decodedHeader, decodedRevision } from '@/lib/server/deliver/naming';
 import { withRequestOwner } from '@/lib/server/identity/with-owner';
 import { createLogger } from '@/lib/logger';
 
@@ -96,7 +98,31 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      return answer(apiSuccess({ jobId: data.jobId, pollIntervalMs: 3000 }, 202));
+      // `deadlineMs` is the service's per-job wall clock. It goes to the client
+      // so its poll budget can cover the whole job; older services omit it and
+      // the client falls back to its own budget.
+      const deadlineMs = typeof data.deadlineMs === 'number' ? data.deadlineMs : undefined;
+
+      // Record the job so the delivery worker can fetch its output on its own.
+      // Nothing about the delivery is reported back: the render is what the
+      // client asked for, and a bookkeeping failure must not fail the submit.
+      //
+      // `x-deliver-cloud: 0` is the operator's "don't upload this one" switch
+      // (Settings → 通用). It has to be honoured here rather than client-side,
+      // because the worker — not the page — fetches and uploads the MP4 later.
+      const jobId = typeof data.jobId === 'string' ? data.jobId : null;
+      const cloudOptOut = req.headers.get('x-deliver-cloud') === '0';
+      if (jobId && !cloudOptOut) {
+        queueVideoDelivery({
+          ownerId,
+          jobId,
+          courseTitle: decodedHeader((name) => req.headers.get(name), 'x-deliver-title'),
+          filename: decodedHeader((name) => req.headers.get(name), 'x-deliver-filename'),
+          revision: decodedRevision((name) => req.headers.get(name)),
+        });
+      }
+
+      return answer(apiSuccess({ jobId: data.jobId, pollIntervalMs: 3000, deadlineMs }, 202));
     } catch (error) {
       // A cap trip aborts the forwarded stream, surfacing here as a fetch error.
       if (capped.exceeded()) {

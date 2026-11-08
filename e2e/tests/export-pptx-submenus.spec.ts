@@ -123,6 +123,13 @@ test.describe('Export menu: PPTX and Resource Pack submenus', () => {
     await expect(page.getByRole('menu')).toBeVisible();
 
     const trigger = subTrigger(page, /^Export PPTX/);
+    // Focus lands on the menu's first item, which is the delivery-bundle export
+    // this fork puts on top, so walk down to the PPTX trigger instead of
+    // assuming the submenu trigger is first.
+    for (let step = 0; step < 10; step += 1) {
+      if (await trigger.evaluate((el) => el === document.activeElement)) break;
+      await page.keyboard.press('ArrowDown');
+    }
     await expect(trigger).toBeFocused();
     await page.keyboard.press('ArrowRight');
     const withPlaceholders = page.getByRole('menuitem', { name: /^With placeholder slides/ });

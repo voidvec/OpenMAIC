@@ -149,6 +149,17 @@ describe('buildMarkdown', () => {
     expect(md).toBe('# C');
   });
 
+  it('separates scenes with a thematic break, and only scenes', () => {
+    const md = buildMarkdown('C', [
+      { sceneId: 'a', sceneTitle: 'A', sceneOrder: 1, text: 'First.' },
+      { sceneId: 'b', sceneTitle: 'B', sceneOrder: 2, text: 'Second.' },
+    ]);
+    // One rule, between the two scenes -- the title is not a scene, so no rule
+    // sits directly under `# C`.
+    expect(md).toBe('# C\n\n## A\n\nFirst.\n\n---\n\n## B\n\nSecond.');
+    expect(md.startsWith('# C\n\n## A')).toBe(true);
+  });
+
   it('filters whitespace-only paragraphs and collapses trailing blank lines', () => {
     const md = buildMarkdown('C', [
       { sceneId: 'a', sceneTitle: 'A', sceneOrder: 1, text: 'Hello\n\n   \n\nWorld' },

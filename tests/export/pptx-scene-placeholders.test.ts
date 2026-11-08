@@ -14,6 +14,8 @@ vi.mock('@/lib/media/asset-pool', () => ({
 }));
 
 import { buildPptxBlob, buildResourcePackZip } from '@/lib/export/use-export-pptx';
+import { assembleDeliveryBundle } from '@/lib/export/delivery-bundle';
+import { quizBookletPath } from '@/lib/export/quiz-booklet';
 import {
   interactivePagePath,
   listInteractivePages,
@@ -245,7 +247,11 @@ async function readText(zip: JSZip, name: string): Promise<string> {
   return file.async('string');
 }
 
-function buildDeck(linkInteractivePages: boolean, classroomUrl: string | null = CLASSROOM_URL) {
+function buildDeck(
+  linkInteractivePages: boolean,
+  classroomUrl: string | null = CLASSROOM_URL,
+  offlineOnlyLinks = false,
+) {
   return buildPptxBlob(
     [slideA, slideB],
     [sceneA, sceneB],
@@ -257,6 +263,7 @@ function buildDeck(linkInteractivePages: boolean, classroomUrl: string | null = 
     planPptxDeck(lesson, t, {
       linkInteractivePages,
       classroomUrl: classroomUrl ?? undefined,
+      offlineOnlyLinks,
     }),
   );
 }
@@ -358,6 +365,67 @@ describe('planPptxDeck', () => {
     // Both link to the scene in the online classroom.
     expect(packEntry.placeholder.online?.url).toBe(sceneUrl('i1'));
     expect(standaloneEntry.placeholder.online?.url).toBe(sceneUrl('i1'));
+  });
+
+  it('prints the pack path and drops the online link in offline-only mode', () => {
+    const deck = planPptxDeck(lesson, t, {
+      linkInteractivePages: true,
+      classroomUrl: CLASSROOM_URL,
+      offlineOnlyLinks: true,
+    });
+    const entry = deck[1];
+    if (entry.kind !== 'placeholder') throw new Error('expected placeholder');
+    // Nothing that points at this deployment survives: no button, no QR, no URL.
+    expect(entry.placeholder.online).toBeUndefined();
+    // What replaces it is the path of the file that did ship.
+    expect(entry.placeholder.offline?.showPath).toBe(true);
+    expect(entry.placeholder.offline?.path).toBe(listInteractivePages(lesson)[0].path);
+    // And the sentence above the links describes what is actually on the slide.
+    // The default copy promises a button and a QR code, neither of which is
+    // drawn here — a reader who follows that sentence finds nothing to press.
+    expect(entry.placeholder.description).toBe('export.placeholder.interactiveDescOffline');
+    const pbl = deck[3];
+    if (pbl.kind !== 'placeholder') throw new Error('expected placeholder');
+    expect(pbl.placeholder.online).toBeUndefined();
+    expect(pbl.placeholder.description).toBe('export.placeholder.pblDescOffline');
+  });
+
+  it('keeps the online description when the slide still shows the way in', () => {
+    const deck = planPptxDeck(lesson, t, {
+      linkInteractivePages: true,
+      classroomUrl: CLASSROOM_URL,
+    });
+    const entry = deck[1];
+    if (entry.kind !== 'placeholder') throw new Error('expected placeholder');
+    expect(entry.placeholder.description).toBe('export.placeholder.interactiveDesc');
+    // No classroom URL means no button either: the copy has to follow the slide
+    // rather than the export mode.
+    const bare = planPptxDeck(lesson, t, { linkInteractivePages: true });
+    const bareEntry = bare[1];
+    if (bareEntry.kind !== 'placeholder') throw new Error('expected placeholder');
+    expect(bareEntry.placeholder.description).toBe('export.placeholder.interactiveDescOffline');
+  });
+
+  it('does not promise a local copy a standalone deck cannot ship', () => {
+    // Export PPTX on its own with the relative-path switch on: there is no
+    // online button (the switch removed it) and no page beside the deck (the
+    // export carries none), so "open the local copy below" would point at a
+    // link that is not on the slide at all. The copy says where the pages come
+    // from instead.
+    const deck = planPptxDeck(lesson, t, {
+      linkInteractivePages: false,
+      classroomUrl: CLASSROOM_URL,
+      offlineOnlyLinks: true,
+    });
+    const entry = deck[1];
+    if (entry.kind !== 'placeholder') throw new Error('expected placeholder');
+    expect(entry.placeholder.online).toBeUndefined();
+    expect(entry.placeholder.offline).toBeUndefined();
+    expect(entry.placeholder.description).toBe('export.placeholder.interactiveDescNoPage');
+    // A PBL scene has no page in any mode, so its copy does not change.
+    const pbl = deck[3];
+    if (pbl.kind !== 'placeholder') throw new Error('expected placeholder');
+    expect(pbl.placeholder.description).toBe('export.placeholder.pblDescOffline');
   });
 
   it('summarizes a quiz by count and question stems', () => {
@@ -561,6 +629,23 @@ describe('online link and QR code', () => {
     );
   });
 
+  it('leaves a reachable path where the online link used to be', async () => {
+    const zip = await loadZip(await buildDeck(true, CLASSROOM_URL, true));
+    const xml = await readText(zip, 'ppt/slides/slide2.xml');
+    // The deployment URL is gone from every form it used to take.
+    expect(xml).not.toContain('export.placeholder.openOnline');
+    expect(xml).not.toContain(sceneUrl('i1'));
+    expect(await slideImage(zip, 2)).toBeNull();
+    // In its place: the page's path, in a text run of its own so the bundle can
+    // rewrite it when the pages move.
+    expect(xml).toContain(`<a:t>${listInteractivePages(lesson)[0].path}</a:t>`);
+    // And the relative link stays, because at that point it is the only way in.
+    const rels = await readText(zip, 'ppt/slides/_rels/slide2.xml.rels');
+    expect(rels).toContain(
+      `Target="${relativeHyperlinkTarget(listInteractivePages(lesson)[0].path)}" TargetMode="External"`,
+    );
+  });
+
   it('keeps the quiet zone light around the code', async () => {
     const matrix = await qrMatrix(sceneUrl('q'));
     const edge = [...matrix[0], ...matrix[matrix.length - 1], ...matrix.map((row) => row[0])];
@@ -620,7 +705,7 @@ describe('link hotspots', () => {
       const zip = await loadZip(await buildDeck(linkInteractivePages));
       for (const [slideNumber, expectedHotspots] of [
         [2, linkInteractivePages ? 3 : 2], // interactive: button, QR + URL, offline link
-        [3, 2], // quiz: button, QR + URL
+        [3, linkInteractivePages ? 3 : 2], // quiz: button, QR + URL, booklet link
       ] as const) {
         const shapes = await slideShapes(zip, slideNumber);
         const hotspots = shapes.filter(isHotspot);
@@ -982,5 +1067,64 @@ describe('interactive scenes that only have a url', () => {
     expect(result.skippedPptx).toBe(false);
     const pack = await loadZip(result.blob!);
     expect(Object.keys(pack.files).filter((n) => !pack.files[n].dir)).toEqual(['deck.pptx']);
+  });
+});
+
+/**
+ * The pack and the bundle see the same pages from two different roots: the pack
+ * keeps them under `interactive/` and `quiz/`, the bundle collects them into one
+ * localized folder. The deck is copied through byte-for-byte apart from its
+ * links, so this is where the two views have to be reconciled — with a real deck
+ * built by the same exporter the app uses, not a hand-written relationship part.
+ */
+describe('delivery bundle over a real pack', () => {
+  it('ships a deck whose page links all resolve inside the bundle', async () => {
+    const pack = await buildResourcePackZip(lesson, {
+      viewportRatio: 0.5625,
+      viewportSize: 1000,
+      ratioPx2Inch: 100,
+      ratioPx2Pt,
+      fileName: 'deck',
+      getPptxBlob: () => buildLessonPptx(lesson),
+      getQuizBooklet: () => ({
+        // The exporter names the booklet from the same string it writes into the
+        // deck's link, so the test has to do the same.
+        path: quizBookletPath('export.quiz.bookletTitle'),
+        html: '<html>quiz</html>',
+      }),
+    });
+
+    const bundle = await assembleDeliveryBundle({
+      title: '二次函数图像四步判断',
+      pack: pack.blob!,
+      scriptDocx: null,
+      scriptMarkdown: null,
+      srt: null,
+      mp4: null,
+      usageNote: 'read me',
+      pagesDir: '交互页面',
+    });
+
+    const zip = await loadZip(bundle);
+    const entries = new Set(Object.keys(zip.files).filter((n) => !zip.files[n].dir));
+    const deckName = [...entries].find((n) => n.endsWith('.pptx'))!;
+    const deck = await JSZip.loadAsync(await zip.file(deckName)!.async('arraybuffer'));
+
+    const dead: string[] = [];
+    for (const name of Object.keys(deck.files)) {
+      if (!/^ppt\/slides\/_rels\/[^/]+\.rels$/.test(name)) continue;
+      const xml = await deck.file(name)!.async('string');
+      for (const [, target] of xml.matchAll(/Target="([^"]+)"\s+TargetMode="External"/g)) {
+        if (/^[a-z][a-z0-9+.-]*:/i.test(target)) continue; // http:, mailto:
+        const path = decodeURIComponent(target.split('#')[0]);
+        if (!entries.has(path)) dead.push(path);
+      }
+    }
+    expect(dead).toEqual([]);
+    // Both kinds of page moved, not just the interactive ones: the booklet used
+    // to arrive as one more loose file next to the pages, with the deck still
+    // pointing at `quiz/`.
+    const bookletName = quizBookletPath('export.quiz.bookletTitle').split('/').pop()!;
+    expect(entries.has(`交互页面/${bookletName}`)).toBe(true);
   });
 });
