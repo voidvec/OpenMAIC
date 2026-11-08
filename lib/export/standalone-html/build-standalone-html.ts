@@ -25,6 +25,7 @@ import type { ClassroomManifest } from '../classroom-zip-types';
 import {
   assembleStandaloneHtmlParts,
   serializeJsonForHtmlScript,
+  type StandaloneAigcNotices,
   type StandaloneEmbeddedMedia,
   type StandaloneHtmlInput,
 } from './assemble';
@@ -535,6 +536,17 @@ async function fetchPlayerAsset(path: string): Promise<string> {
 export interface StandaloneHtmlExportOptions extends StandaloneMediaDeps {
   strings: StandalonePlayerStrings;
   /**
+   * The mandatory AI-generated notices (visible label + provider/content id).
+   * The page carries them when present; the caller localizes the label and
+   * resolves the identifiers for this deployment.
+   */
+  aigc?: StandaloneAigcNotices;
+  /**
+   * Product name written to `<meta name="generator">`; omitted keeps the
+   * shipped one. See {@link StandaloneHtmlInput.generator}.
+   */
+  generator?: string;
+  /**
    * Embed narration audio (stored and legacy URL narration) and video clips
    * so the file plays like the classroom. Without it the file stays small:
    * speech plays on the reading timer with captions and videos show their
@@ -567,6 +579,17 @@ export interface StandaloneHtmlExportOptions extends StandaloneMediaDeps {
    * ({@link STANDALONE_ZIP_README_EN}) always follows it.
    */
   zipReadme?: string;
+  /**
+   * Appended to the file name before the extension (with a `-` separator), e.g.
+   * `Lesson-narrated.html`.
+   *
+   * Both variants are built from the same lesson and would otherwise be named
+   * identically. Two exports into one cloud folder then arrive as `Lesson.html`
+   * and `Lesson(1).html`, and the buyer cannot tell which one plays the
+   * narration. Only the narrated variant needs it: the silent file keeps the
+   * plain name, which is the one most customers open first.
+   */
+  nameSuffix?: string;
   /** Timestamp of the ZIP entries; defaults to now. */
   zipDate?: Date;
 }
@@ -710,8 +733,13 @@ export async function buildStandaloneHtmlExport(
     extraStyles: mathFonts ? [mathFonts] : [],
     extraScripts: chartsScript ? [chartsScript] : [],
     lang: options.lang,
+    ...(options.aigc ? { aigc: options.aigc } : {}),
+    ...(options.generator ? { generator: options.generator } : {}),
   };
   const baseName = classroomExportBaseName(snapshot.stageName);
+  // One lesson, two variants: the suffix is what keeps them apart on disk and
+  // in the cloud folder. Empty/absent means the plain name (silent variant).
+  const suffix = options.nameSuffix?.trim() ? `-${options.nameSuffix.trim()}` : '';
   const report = {
     inlineFailures: snapshot.inlineFailures,
     unresolvedMedia: unresolved,
@@ -732,7 +760,7 @@ export async function buildStandaloneHtmlExport(
       return {
         format: 'html',
         blob,
-        fileName: `${baseName}${STANDALONE_HTML_EXTENSION}`,
+        fileName: `${baseName}${suffix}${STANDALONE_HTML_EXTENSION}`,
         ...report,
         byteSize: blob.size,
       };
@@ -751,7 +779,7 @@ export async function buildStandaloneHtmlExport(
   return {
     format: 'zip',
     blob,
-    fileName: `${baseName}${STANDALONE_ZIP_EXTENSION}`,
+    fileName: `${baseName}${suffix}${STANDALONE_ZIP_EXTENSION}`,
     ...report,
     byteSize: blob.size,
     ...(singleFileBytes !== undefined ? { singleFileBytes } : {}),

@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import { saveAs } from 'file-saver';
 import { toast } from 'sonner';
+import { resolveSaveTarget, writeSaveTarget, SAVE_DIR_IDS } from '@/lib/download/save-target';
 import { useStageStore } from '@/lib/store/stage';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import {
@@ -384,6 +384,11 @@ export function useExportClassroom() {
     const { stage, scenes } = useStageStore.getState();
     if (!stage?.id || scenes.length === 0) return;
 
+    // Ask where to save while the click's user activation is still live —
+    // packaging many scenes takes far longer than the picker's window.
+    const target = await resolveSaveTarget(SAVE_DIR_IDS.classroomZip);
+    if (!target) return;
+
     setExporting(true);
     const toastId = toast.loading(t('export.exporting'));
 
@@ -393,7 +398,7 @@ export function useExportClassroom() {
         scenes,
       );
 
-      saveAs(zip, fileName);
+      await writeSaveTarget(target, fileName, zip);
 
       const partialCount = inlineFailures.length + missingAudioCount;
       if (partialCount > 0) {

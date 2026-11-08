@@ -21,6 +21,7 @@
  *
  * Pure: depends only on the IR, the subtitle serializer, and the effect emitter.
  */
+import { AIGC_LABEL_VISIBLE_SECONDS, aigcLabelFontPx, type AigcIdentifiers } from '../aigc-label';
 import type {
   PblCoverVisual,
   QuizCoverVisual,
@@ -129,6 +130,13 @@ export interface VideoExportLabels extends QuizQuestionListLabels {
   ctaVisit: string;
   /** Localized fallback and failure copy for static interactive scenes. */
   interactive: InteractiveFallbackLabels;
+  /**
+   * 显式标识 text burned onto the opening frames. GB 45438-2025 §5.4 requires it
+   * to contain both an AI element ("AI" / "人工智能") and a generated-content
+   * element ("generated" / "生成合成"), which is why it is a localized string and
+   * not an assembled one.
+   */
+  aigc: string;
 }
 
 /** Backward-compatible name for app-side cover and Quiz measurement labels. */
@@ -170,6 +178,19 @@ export interface EmitHyperframesOptions {
    * the bottom caption band is emitted and driven by the paused timeline.
    */
   burnInSubtitles?: boolean;
+  /**
+   * Provider identifiers for the mandatory AIGC label. Omitted or null emits no
+   * label at all — only for fixtures and measurement passes that never become a
+   * customer-facing file; every export path that writes a ZIP for a user passes
+   * {@link resolveAigcIdentifiers} here.
+   */
+  aigc?: AigcIdentifiers | null;
+  /**
+   * Product name written into the project README heading and the composition's
+   * `<title>`. A white-labelled deployment passes its own name, because the
+   * ZIP is handed to that customer's learners. Default `OpenMAIC`.
+   */
+  brandName?: string;
 }
 
 export interface EmittedProject {
@@ -215,6 +236,7 @@ const DEFAULT_VIDEO_EXPORT_LABELS: VideoExportLabels = {
   quizCtaPrompt: 'Want to try an interactive quiz?',
   pblCtaPrompt: 'Want to explore project-based learning?',
   ctaVisit: 'Visit',
+  aigc: 'AI-generated content',
   interactive: {
     fallback: 'interactive-static-fallback',
     readyTimeout: 'interactive-ready-timeout',
@@ -279,9 +301,14 @@ function renderBase(scene: VideoTimelineScene, labels: VideoExportLabels): strin
     );
     return [
       `<div ${clip} data-interactive-static-host data-scene-id="${escapeHtml(scene.id)}" data-ready-timeout-ms="${scene.base.readyTimeoutMs}" data-content-hash="${escapeHtml(scene.base.contentHash)}" style="position:absolute;inset:0">`,
-      `  <div id="${contentId}" data-interactive-static-visibility-wrapper style="position:absolute;inset:0;background:#0f172a;visibility:hidden;opacity:0">`,
+      // Kept out of the composition until the timeline's autoAlpha reveals the
+      // wrapper. Hidden with `opacity` rather than `visibility` so nothing about
+      // the frame's paint is switched off while the child page works out what to
+      // show; the packaged page runs its own frame clock, so painting no longer
+      // depends on who owns the compositor either way.
+      `  <div id="${contentId}" data-interactive-static-visibility-wrapper style="position:absolute;inset:0;background:#0f172a;opacity:0">`,
       `    <div data-interactive-fallback>${fallback}</div>`,
-      `    <iframe data-interactive-static-frame data-src="${escapeHtml(assetUrl(scene.base.assetRef))}" title="${escapeHtml(scene.title)}" sandbox="allow-scripts" style="position:absolute;inset:0;width:100%;height:100%;border:0;visibility:hidden;pointer-events:none;background:#fff"></iframe>`,
+      `    <iframe data-interactive-static-frame data-src="${escapeHtml(assetUrl(scene.base.assetRef))}" title="${escapeHtml(scene.title)}" sandbox="allow-scripts" style="position:absolute;inset:0;width:100%;height:100%;border:0;pointer-events:none;background:#fff"></iframe>`,
       `  </div>`,
       `</div>`,
     ].join('\n');
@@ -1122,6 +1149,8 @@ function renderReadme(project: {
   cta: VideoExportCta | null;
   hasQuizQuestionList: boolean;
   quizScriptFonts: readonly QuizScriptFont[];
+  /** Product that produced this project; the reader is a customer's learner. */
+  brandName: string;
 }): string {
   const seconds = (project.totalDurationMs / 1000).toFixed(1);
   const effectiveLabels = JSON.stringify(project.labels, null, 2);
@@ -1160,7 +1189,7 @@ function renderReadme(project: {
   const scriptFontSummary = project.quizScriptFonts.length
     ? `, ${project.quizScriptFonts.join(' and ')}`
     : '';
-  return `# ${project.stageName} — OpenMAIC video export
+  return `# ${project.stageName} — ${project.brandName} video export
 
 Self-contained [Hyperframes](https://github.com/heygen-com/hyperframes) composition
 for the classroom **${project.stageName}**. Everything needed to render is in this
@@ -1245,6 +1274,8 @@ export function emitHyperframes(
     },
   };
   const cta = options.cta ?? null;
+  const aigc = options.aigc ?? null;
+  const brandName = options.brandName ?? 'OpenMAIC';
   const locale = options.locale ?? DEFAULT_LOCALE;
   const quizDirection = isRtl(locale) ? 'rtl' : 'ltr';
   const totalSec = sec(ir.totalDurationMs);
@@ -1300,6 +1331,50 @@ export function emitHyperframes(
     : { html: '', statements: [] };
   statements.push(...subtitles.statements);
 
+  // GB 45438-2025 §5.4: an export handed to a user must carry an explicit label
+  // on the opening frame, at an edge or corner, with character height of at
+  // least 5% of the frame's shorter side and visible for at least 2s. It is
+  // driven by the timeline rather than CSS animation because the capture seeks
+  // to arbitrary times — a CSS keyframe would not follow the seek and the label
+  // could be missing from exactly the frames a reviewer looks at first.
+  const aigcFontPx = aigc ? aigcLabelFontPx(width, height) : 0;
+  const aigcInset = Math.round(aigcFontPx * 0.4);
+  const aigcLabelStyle = [
+    'position:absolute',
+    `left:${aigcInset}px`,
+    `bottom:${aigcInset}px`,
+    'z-index:2147483647',
+    `max-width:${Math.round(width * 0.72)}px`,
+    `padding:${Math.round(aigcFontPx * 0.16)}px ${Math.round(aigcFontPx * 0.44)}px`,
+    `border-radius:${Math.round(aigcFontPx * 0.18)}px`,
+    'background:rgba(0,0,0,0.62)',
+    'color:#fff',
+    `font-size:${aigcFontPx}px`,
+    'line-height:1.25',
+    'letter-spacing:0.01em',
+    'font-family:Inter,sans-serif',
+    'pointer-events:none',
+  ].join(';');
+  const aigcLabelHtml = aigc
+    ? `\n<div id="aigc-label" dir="auto" style="${aigcLabelStyle}">${escapeHtml(labels.aigc)}</div>`
+    : '';
+  // §6.1 文件元数据隐式标识 — the flag, the provider and the content id. Written
+  // into the project document so the hidden label survives into anything that
+  // keeps the HTML; the MP4 container carries its own copy once rendered.
+  const aigcMetaHtml = aigc
+    ? [
+        '<meta name="aigc" content="generated" />',
+        `<meta name="aigc-provider" content="${escapeHtml(aigc.provider)}" />`,
+        `<meta name="aigc-content-id" content="${escapeHtml(aigc.contentId)}" />`,
+      ].join('\n') + '\n'
+    : '';
+  if (aigc) {
+    statements.push(`tl.set('#aigc-label', { opacity: 1 }, 0);`);
+    statements.push(
+      `tl.set('#aigc-label', { opacity: 0 }, ${Math.min(AIGC_LABEL_VISIBLE_SECONDS, totalSec)});`,
+    );
+  }
+
   // Extend the timeline to the full composition length even if the last tween
   // ends earlier, so clips (esp. video/audio) are not cut short.
   statements.push(`tl.set({}, {}, ${totalSec});`);
@@ -1309,7 +1384,7 @@ export function emitHyperframes(
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>${escapeHtml(ir.stage.name)} — OpenMAIC video</title>
+${aigcMetaHtml}<title>${escapeHtml(ir.stage.name)} — ${escapeHtml(brandName)} video</title>
 <style>
   ${INTER_FONT_FACE_CSS}${
     hasQuizQuestionList
@@ -1326,7 +1401,7 @@ ${coverCardCss(width)}${hasQuizQuestionList ? `\n${quizQuestionListCss(width)}` 
 <div id="${compositionId}" data-composition-id="${compositionId}" data-start="0" data-duration="${totalSec}" data-width="${width}" data-height="${height}" style="position:relative;width:${width}px;height:${height}px;overflow:hidden;background:#000">
 ${sceneHtml.filter(Boolean).join('\n')}
 ${effectHtml.join('\n')}
-${subtitles.html}
+${subtitles.html}${aigcLabelHtml}
 <script type="application/json" data-openmaic-runtime-diagnostics>[]</script>
 </div>
 <script src="${escapeHtml(gsapVendorPath)}"></script>
@@ -1386,6 +1461,7 @@ window.__openmaicInteractiveReady.then(function () {
         cta,
         hasQuizQuestionList,
         quizScriptFonts: quizFontPlan.scripts,
+        brandName,
       }),
     },
   ];

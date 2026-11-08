@@ -10,13 +10,14 @@
  * only the compiler (no asset collection, no ZIP, no render service), so it's
  * fast and works whether or not the render service is configured.
  *
- * App-side / impure: store read, sonner toast, `saveAs` download.
+ * App-side / impure: store read, sonner toast, interactive save target
+ * ({@link resolveSaveTarget}).
  */
 import { useCallback, useState } from 'react';
-import { saveAs } from 'file-saver';
 import { toast } from 'sonner';
 import { useI18n } from '@/lib/hooks/use-i18n';
 import { createLogger } from '@/lib/logger';
+import { resolveSaveTarget, writeSaveTarget, SAVE_DIR_IDS } from '@/lib/download/save-target';
 import { useVideoRenderStore } from '@/lib/store/video-render';
 import { acquireExport, releaseExport } from './export-in-flight';
 import { NoScenesError, sanitizeFilename } from './export-options';
@@ -34,8 +35,18 @@ export function useDownloadSubtitles() {
     async (format: SubtitleFormat = 'srt') => {
       if (downloading) return;
       // Shared with the ZIP export: both funnel through the same stage-store /
-      // Dexie compile, so only one export operation runs at a time.
+      // Dexie compile, so only one export operation runs at a time. The lock is
+      // taken *before* the picker because that dialog can stay open
+      // indefinitely, and a second export must not slip in during that window.
       if (!acquireExport()) return;
+      // Resolve the destination up front: the folder picker requires the
+      // click's user activation, and compiling consumes it. `acquireExport` is
+      // synchronous, so the activation is still live here.
+      const target = await resolveSaveTarget(SAVE_DIR_IDS.subtitles);
+      if (!target) {
+        releaseExport();
+        return;
+      }
       setDownloading(true);
       const toastId = toast.loading(t('export.subtitlesCompiling'));
       try {
@@ -51,7 +62,7 @@ export function useDownloadSubtitles() {
         const content = format === 'vtt' ? vtt : srt;
         const mime = format === 'vtt' ? 'text/vtt' : 'application/x-subrip';
         const blob = new Blob([content], { type: `${mime};charset=utf-8` });
-        saveAs(blob, `${sanitizeFilename(stageName)}.${format}`);
+        await writeSaveTarget(target, `${sanitizeFilename(stageName)}.${format}`, blob);
         toast.success(t('export.subtitlesSuccess'), { id: toastId });
       } catch (error) {
         if (error instanceof NoScenesError) {

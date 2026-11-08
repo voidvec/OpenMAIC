@@ -473,6 +473,18 @@ describe('standalone HTML export', () => {
     const { fileName } = await exportFixture();
     expect(fileName).toBe('Photosynthesis_ _Light_ & _Life_.html');
   });
+
+  // Both variants come from one lesson. Without a marker the second export
+  // arrives as `... (1).html` and the buyer cannot tell which one has audio.
+  it('marks the narrated file so the two variants stay apart', async () => {
+    const { fileName } = await exportFixture({ includeNarration: true, nameSuffix: 'narrated' });
+    expect(fileName).toBe('Photosynthesis_ _Light_ & _Life_-narrated.html');
+  });
+
+  it('leaves the silent file on the plain name', async () => {
+    const { fileName } = await exportFixture({ includeNarration: false, nameSuffix: '  ' });
+    expect(fileName).toBe('Photosynthesis_ _Light_ & _Life_.html');
+  });
 });
 
 const INJECTED_TEXT = `<p><img src="x" onerror="document.body.setAttribute('data-pwned','1')">Hello</p>`;
@@ -1365,6 +1377,68 @@ describe('assembleStandaloneHtml', () => {
     playerStyle: '',
     lang: 'en-US',
   };
+
+  it('carries the AIGC notice as a visible label plus head metadata', () => {
+    const html = assembleStandaloneHtml({
+      ...base,
+      playerScript: '',
+      aigc: { label: 'AI 生成', provider: 'Acme', contentId: 'stage-1' },
+    });
+    expect(html).toContain(
+      '<div class="openmaic-aigc-label" role="note" data-testid="aigc-label">AI 生成</div>',
+    );
+    // The hidden half (§6.1): machine-readable provider and content number.
+    expect(html).toContain('<meta name="ai-generated" content="true">');
+    expect(html).toContain('<meta name="aigc:provider" content="Acme">');
+    expect(html).toContain('<meta name="aigc:content-id" content="stage-1">');
+    // Outside the player root, so a player that never mounts cannot drop it.
+    expect(html.indexOf('data-testid="aigc-label"')).toBeLessThan(
+      html.indexOf('<div id="openmaic-player">'),
+    );
+    // Never swallows a click on the slide underneath it.
+    expect(html).toContain('pointer-events:none');
+    // Under the header (h-12 = 48px), not above the footer: on a phone the
+    // caption turns into a static band right there and a bottom-anchored
+    // notice would sit on the subtitle text.
+    expect(html).toContain('left:10px;top:56px');
+    expect(html).not.toContain('bottom:64px');
+  });
+
+  it('names the deployment that produced the file, and the shipped product by default', () => {
+    const branded = assembleStandaloneHtml({
+      ...base,
+      playerScript: '',
+      generator: 'Acme Academy',
+    });
+    expect(branded).toContain('<meta name="generator" content="Acme Academy">');
+    // Omitted keeps the shipped name, so callers that predate the option and
+    // the default deployment read the same as before.
+    const shipped = assembleStandaloneHtml({ ...base, playerScript: '' });
+    expect(shipped).toContain('<meta name="generator" content="OpenMAIC">');
+  });
+
+  it('escapes the generator name rather than trusting the configuration', () => {
+    const html = assembleStandaloneHtml({
+      ...base,
+      playerScript: '',
+      generator: 'A"B<C> & D',
+    });
+    expect(html).toContain('content="A&quot;B&lt;C&gt; &amp; D"');
+  });
+
+  it('escapes the AIGC notice, and writes none when the caller omits it', () => {
+    const html = assembleStandaloneHtml({
+      ...base,
+      playerScript: '',
+      aigc: { label: '<AI>', provider: 'a"b', contentId: 'x&y' },
+    });
+    expect(html).toContain('&lt;AI&gt;');
+    expect(html).toContain('content="a&quot;b"');
+    expect(html).toContain('content="x&amp;y"');
+    const plain = assembleStandaloneHtml({ ...base, playerScript: '' });
+    expect(plain).not.toContain('aigc-label');
+    expect(plain).not.toContain('name="ai-generated"');
+  });
 
   it('refuses a player payload that would end its element', () => {
     expect(() => assembleStandaloneHtml({ ...base, playerScript: 'var s = "</script>";' })).toThrow(

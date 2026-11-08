@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   createQuizLayoutProbe: vi.fn(),
   emitHyperframes: vi.fn(),
   packageVideoZip: vi.fn(),
+  resolveAigcIdentifiers: vi.fn(),
   stageState: vi.fn(),
   toSrt: vi.fn(),
   toVtt: vi.fn(),
@@ -16,6 +17,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/lib/video-export', () => ({
   compileVideoTimeline: mocks.compileVideoTimeline,
   emitHyperframes: mocks.emitHyperframes,
+  resolveAigcIdentifiers: mocks.resolveAigcIdentifiers,
   toSrt: mocks.toSrt,
   toVtt: mocks.toVtt,
 }));
@@ -58,6 +60,7 @@ beforeEach(() => {
   mocks.createQuizLayoutProbe.mockResolvedValue({ measureQuestionList: vi.fn() });
   mocks.compileVideoTimeline.mockReturnValue({ diagnostics: [] });
   mocks.emitHyperframes.mockReturnValue({ files: [] });
+  mocks.resolveAigcIdentifiers.mockReturnValue({ provider: 'OpenMAIC', contentId: 'stage-1' });
   mocks.collectVideoAssets.mockResolvedValue({ blobs: new Map(), missing: [] });
   mocks.packageVideoZip.mockResolvedValue(new Blob(['zip']));
 });
@@ -200,5 +203,71 @@ describe('buildExportZip app boundary', () => {
     expect(mocks.emitHyperframes.mock.calls[0][1]).toMatchObject({ cta: null });
     expect(mocks.emitHyperframes.mock.calls[1][1]).toMatchObject({ cta: null });
     warn.mockRestore();
+  });
+});
+
+describe('buildExportZip AIGC boundary', () => {
+  const PROVIDER_KEY = 'NEXT_PUBLIC_AIGC_PROVIDER';
+  const ID_KEY = 'NEXT_PUBLIC_AIGC_CONTENT_ID';
+
+  it('names the deployment as the provider when no legal entity is configured', async () => {
+    const originalProvider = process.env[PROVIDER_KEY];
+    mocks.accessDocument.mockResolvedValue(undefined);
+    delete process.env[PROVIDER_KEY];
+
+    try {
+      await buildExportZip({ resolution: '720p', locale: 'en-US', brandName: '智造学堂' });
+
+      // §6.1 wants the service provider, and a white-labelled deployment is
+      // the one offering the file — its brand is the honest answer there.
+      expect(mocks.resolveAigcIdentifiers).toHaveBeenCalledWith('智造学堂', undefined, 'stage-1');
+    } finally {
+      if (originalProvider !== undefined) process.env[PROVIDER_KEY] = originalProvider;
+    }
+  });
+
+  it('keeps an explicitly configured provider ahead of the brand', async () => {
+    const originalProvider = process.env[PROVIDER_KEY];
+    mocks.accessDocument.mockResolvedValue(undefined);
+    // A legal entity named by the operator outranks a cosmetic setting.
+    process.env[PROVIDER_KEY] = '智造学堂科技有限公司';
+
+    try {
+      await buildExportZip({ resolution: '720p', locale: 'en-US', brandName: '智造学堂' });
+
+      expect(mocks.resolveAigcIdentifiers).toHaveBeenCalledWith(
+        '智造学堂科技有限公司',
+        undefined,
+        'stage-1',
+      );
+    } finally {
+      if (originalProvider === undefined) delete process.env[PROVIDER_KEY];
+      else process.env[PROVIDER_KEY] = originalProvider;
+    }
+  });
+
+  it('resolves the label from the deployment name and the classroom id', async () => {
+    const originalProvider = process.env[PROVIDER_KEY];
+    const originalId = process.env[ID_KEY];
+    mocks.accessDocument.mockResolvedValue(undefined);
+    delete process.env[PROVIDER_KEY];
+    delete process.env[ID_KEY];
+
+    try {
+      await buildExportZip({ resolution: '720p', locale: 'en-US' });
+
+      // The classroom id doubles as the §6.1 per-content number: one course,
+      // one number, across every re-export.
+      expect(mocks.resolveAigcIdentifiers).toHaveBeenCalledWith(undefined, undefined, 'stage-1');
+      expect(mocks.emitHyperframes).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          aigc: { provider: 'OpenMAIC', contentId: 'stage-1' },
+        }),
+      );
+    } finally {
+      if (originalProvider !== undefined) process.env[PROVIDER_KEY] = originalProvider;
+      if (originalId !== undefined) process.env[ID_KEY] = originalId;
+    }
   });
 });

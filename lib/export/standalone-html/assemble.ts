@@ -126,10 +126,71 @@ const FALLBACK_STYLE = [
   '@keyframes openmaic-fallback-in{to{opacity:1}}',
 ].join('');
 
+/**
+ * The AIGC notices an exported file must carry (《人工智能生成合成内容标识办法》
+ * article 4, GB 45438-2025 §6.1): a visible label and the provider/content
+ * identifiers in the file's metadata.
+ *
+ * Passed in as plain data rather than resolved here, so this module stays a
+ * pure, dependency-free serializer: the caller owns the localized label text
+ * and the deployment's identifiers.
+ */
+export interface StandaloneAigcNotices {
+  /** Visible label text, localized; names the content as AI-generated. */
+  label: string;
+  /** 生成合成服务提供者名称或编码. */
+  provider: string;
+  /** 生成合成服务提供者对内容的唯一编号. */
+  contentId: string;
+}
+
+/**
+ * Style of the visible label. Pinned in the page (not the player's CSS) so a
+ * player restyle can never hide a legally required notice, and
+ * `pointer-events: none` so it never swallows a click on a slide control.
+ *
+ * Anchored top-left, just under the player header (`h-12`, 48px) with an 8px
+ * gap, rather than bottom-right. The bottom-right corner belonged to the
+ * play/next footer, and 8px above it (`bottom:64px`) sat exactly where the
+ * caption goes: on wide screens `.caption-bar` floats over the scene, so the
+ * label merely shared the strip with it, but at `max-width:639px` or
+ * `max-height:499px` the bar turns into a static 80px band between the scene
+ * and the footer, and the notice covered the subtitle text on a phone. The
+ * header is fixed-height at every breakpoint, so anchoring below it clears the
+ * captions everywhere; the label still stays outside the player root and out
+ * of the header itself, which the player owns.
+ *
+ * The type size is viewport-relative rather than a fixed 11px. A page is opened
+ * anywhere from a 1280 laptop to a 3840 projector, and a fixed size is a
+ * different label on each: legible at one, a speck at another. `0.9vw` keeps
+ * the notice the same fraction of the page (≈13px at 1440, ≈17px at 1920), and
+ * the `clamp` bounds stop it from dropping below legibility on a phone or
+ * growing into a banner on a 4K display. The 12px floor is the smallest size a
+ * CJK notice still reads at, and 20px is the largest that still looks like a
+ * notice rather than a caption band.
+ */
+const AIGC_LABEL_STYLE = [
+  '.openmaic-aigc-label{position:fixed;left:10px;top:56px;z-index:2147483647;',
+  'box-sizing:border-box;max-width:46vw;padding:2px 8px;border-radius:4px;',
+  'background:rgba(15,23,42,.45);color:#fff;',
+  'font:400 clamp(12px,.9vw,20px)/1.3 system-ui,-apple-system,"Segoe UI",sans-serif;',
+  'letter-spacing:.01em;pointer-events:none;user-select:none}',
+  '.openmaic-aigc-label[hidden]{display:none}',
+].join('');
+
 export interface StandaloneHtmlInput {
   /** The classroom manifest, already prepared for offline playback. */
   manifest: ClassroomManifest;
   config: StandalonePlayerConfig;
+  /** The mandatory AI-generated notices; omitted only by callers that predate them. */
+  aigc?: StandaloneAigcNotices;
+  /**
+   * Name written to `<meta name="generator">`. A white-labelled deployment
+   * passes its own product name, because the file is handed to that
+   * customer's learners and should not advertise ours. Omitted keeps the
+   * shipped name.
+   */
+  generator?: string;
   /** Precompiled player bundle (an IIFE). */
   playerScript: string;
   /** Precompiled player + renderer CSS. */
@@ -236,6 +297,12 @@ export function assembleStandaloneHtmlParts(input: StandaloneHtmlInput): string[
   const fallbackRoot = fallbackText
     ? `<p class="openmaic-message ${STANDALONE_FALLBACK_CLASS}" data-testid="script-fallback" data-failed-text="${escapeHtmlText(strings.startFailed ?? '')}">${fallbackText}</p>`
     : '';
+  // The visible label sits outside `#root`: it must survive a player that
+  // fails to mount, and the player replaces its root's content on every render.
+  const aigc = input.aigc;
+  const aigcLabel = aigc
+    ? `<div class="openmaic-aigc-label" role="note" data-testid="aigc-label">${escapeHtmlText(aigc.label)}</div>`
+    : '';
   return [
     '<!doctype html>',
     `<html lang="${escapeHtmlText(input.lang)}">`,
@@ -244,15 +311,25 @@ export function assembleStandaloneHtmlParts(input: StandaloneHtmlInput): string[
     `<meta http-equiv="Content-Security-Policy" content="${csp}">`,
     '<meta name="referrer" content="no-referrer">',
     '<meta name="viewport" content="width=device-width, initial-scale=1">',
-    '<meta name="generator" content="OpenMAIC">',
+    `<meta name="generator" content="${escapeHtmlText(input.generator ?? 'OpenMAIC')}">`,
+    // Hidden label (§6.1): the machine-readable half of the same notice.
+    ...(aigc
+      ? [
+          '<meta name="ai-generated" content="true">',
+          `<meta name="aigc:provider" content="${escapeHtmlText(aigc.provider)}">`,
+          `<meta name="aigc:content-id" content="${escapeHtmlText(aigc.contentId)}">`,
+        ]
+      : []),
     `<title>${escapeHtmlText(title)}</title>`,
     styles,
     `<style>${FALLBACK_STYLE}</style>`,
+    ...(aigc ? [`<style>${AIGC_LABEL_STYLE}</style>`] : []),
     ...(fallbackText
       ? [`<noscript><style>.${STANDALONE_FALLBACK_CLASS}{display:none}</style></noscript>`]
       : []),
     '</head>',
     '<body>',
+    ...(aigcLabel ? [aigcLabel] : []),
     `<div id="${STANDALONE_ROOT_ELEMENT_ID}"></div>`,
     `<script type="application/json" id="${STANDALONE_MANIFEST_ELEMENT_ID}">${serializeJsonForHtmlScript(input.manifest)}</script>`,
     `<script type="application/json" id="${STANDALONE_CONFIG_ELEMENT_ID}">${serializeJsonForHtmlScript(input.config)}</script>`,

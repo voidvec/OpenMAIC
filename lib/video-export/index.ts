@@ -19,6 +19,7 @@
  *   );
  *   const manifest = emitManifest(ir); // validated JSON
  */
+export * from './aigc-label';
 export * from './ir';
 export * from './deps';
 export * from './geometry';

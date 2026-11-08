@@ -208,6 +208,7 @@ export function getVideoExportCoverLabels(locale: Locale): VideoExportLabels {
     quizCtaPrompt: at('export.videoQuizCtaPrompt'),
     pblCtaPrompt: at('export.videoPblCtaPrompt'),
     ctaVisit: at('export.videoCtaVisit'),
+    aigc: at('export.aigcLabel'),
     interactive: {
       fallback: at('export.videoFailed'),
       readyTimeout: at('export.videoRendering'),

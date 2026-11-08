@@ -17,7 +17,10 @@
  * - `autoVoiceCache`: reference clips for re-registering auto voices;
  * - `courseThumbnails`: the home library's derived course thumbnails (a
  *   course's first slide and its media bytes), so a reload shows them without
- *   reading the course again (see `lib/utils/course-thumbnail-cache.ts`).
+ *   reading the course again (see `lib/utils/course-thumbnail-cache.ts`);
+ * - `renderedVideos`: the last finished MP4 per course, so the delivery bundle
+ *   can put the video inside the zip the buyer opens (the render service keeps
+ *   neither its jobs nor its output across a restart).
  *
  * This is a database of its own (`maic-device-cache`), separate from the
  * pre-server browser database (`MAIC-Database`), which is read-only and kept
@@ -137,6 +140,33 @@ export function mediaFileKey(stageId: string, elementId: string): string {
   return `${stageId}:${elementId}`;
 }
 
+/**
+ * The finished MP4 of the last successful render, kept so the delivery bundle
+ * can ship it.
+ *
+ * Why the bytes and not the render job: the render service holds job state in
+ * memory and its output under a temporary directory, so a container restart
+ * loses both (2026-11-07: a 31-minute, 31268-frame render was unreachable this
+ * way). The bundle is exported long after the render finished, which makes the
+ * service the one source that cannot be relied on. One record per course —
+ * a re-render replaces the previous one rather than accumulating 45 MB copies.
+ */
+export interface RenderedVideoRecord {
+  /** Primary key: the course this video belongs to. */
+  stageId: string;
+  blob: Blob;
+  /** Name the render used, so the bundle can reuse it instead of inventing one. */
+  filename: string;
+  bytes: number;
+  width: number;
+  height: number;
+  fps: number;
+  durationSec: number;
+  /** Render quality preset (`standard` / `high`), quoted by the format sheet. */
+  quality: string;
+  createdAt: number;
+}
+
 export const DEVICE_DATABASE_NAME = 'maic-device-cache';
 
 interface DeviceMetaRecord {
@@ -158,6 +188,7 @@ class DeviceDatabase extends Dexie {
   voiceProfiles!: EntityTable<VoiceProfileRecord, 'id'>;
   autoVoiceCache!: EntityTable<AutoVoiceCacheRecord, 'voiceId'>;
   courseThumbnails!: Table<CourseThumbnailRecord, [string, string]>;
+  renderedVideos!: EntityTable<RenderedVideoRecord, 'stageId'>;
   meta!: EntityTable<DeviceMetaRecord, 'key'>;
 
   constructor() {
@@ -177,6 +208,11 @@ class DeviceDatabase extends Dexie {
     this.version(2).stores({ imageFiles: null });
     // Version 3 adds the home library's course thumbnails.
     this.version(3).stores({ courseThumbnails: '[ownerKey+stageId], usedAt' });
+    // Version 4 keeps the last successful render per course, so the delivery
+    // bundle ships a real MP4 instead of the zip-with-no-video the export used
+    // to produce. `stageId` is the primary key: a re-render replaces the old
+    // bytes rather than leaving a second 45 MB copy behind.
+    this.version(4).stores({ renderedVideos: 'stageId, createdAt' });
     // Runs before the first query of every open (sticky), so no reader sees
     // the table before the carry-over. Queries inside must go through the VIP
     // handle Dexie passes in; the regular one waits for this very handler.

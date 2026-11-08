@@ -17,19 +17,23 @@
  * still fire if the calling component has unmounted.
  */
 import { create } from 'zustand';
-import { saveAs } from 'file-saver';
 import { toast } from 'sonner';
 import { createLogger } from '@/lib/logger';
 import { runPolledTask } from '@/lib/media/polled-task';
+import { writeSaveTarget, type SaveTarget } from '@/lib/download/save-target';
+import { peekDeliveryRevision } from '@/lib/download/delivery-revision';
 import {
   NoScenesError,
   sanitizeFilename,
+  VIDEO_RESOLUTIONS,
   type VideoFps,
   type VideoQuality,
   type VideoResolution,
 } from '@/lib/video-export-app/export-options';
+import { measureVideoDuration, saveRenderedVideo } from '@/lib/device-storage/rendered-video';
 import type { Locale } from '@/lib/i18n';
 import { useStageStore } from '@/lib/store/stage';
+import { useSettingsStore } from '@/lib/store/settings';
 import { observeExportChanges } from '@/lib/video-export-app/observe-export-changes';
 import { resolveExportStageName } from '@/lib/video-export-app/resolve-stage-name';
 
@@ -38,7 +42,30 @@ type BuildExportZipResult = import('@/lib/video-export-app/build-export-zip').Bu
 const log = createLogger('VideoRenderStore');
 
 const POLL_INTERVAL_MS = 3000;
-const MAX_POLL_ATTEMPTS = Math.ceil((60 * 60 * 1000) / POLL_INTERVAL_MS);
+/**
+ * Wait budget used when the render service does not advertise its own job
+ * deadline (older services). This is the historical fixed ceiling.
+ */
+const FALLBACK_POLL_BUDGET_MS = 60 * 60 * 1000;
+/**
+ * Absolute ceiling on the wait, whatever the service advertises. Guards against
+ * a bogus deadline turning a stuck job into an unbounded poll.
+ */
+const MAX_POLL_BUDGET_MS = 4 * 60 * 60 * 1000;
+/**
+ * Slack past the service's deadline. The service stops *capturing* at its
+ * deadline but still has to encode and remux the frames it already has, so a
+ * wait ending exactly at the deadline would abandon a job that is about to
+ * succeed.
+ */
+const DEADLINE_GRACE_MS = 5 * 60 * 1000;
+/**
+ * Attempt ceiling sized for the absolute cap. The real bound is the time-based
+ * budget below: a fixed attempt count shorter than the service's deadline made
+ * the client give up (and cancel) renders that were still progressing, which
+ * made any classroom longer than that ceiling impossible to export.
+ */
+const MAX_POLL_ATTEMPTS = Math.ceil(MAX_POLL_BUDGET_MS / POLL_INTERVAL_MS);
 /** Below this percent the extrapolated ETA is too noisy to show. */
 const ETA_MIN_PERCENT = 3;
 /**
@@ -68,7 +95,11 @@ type ResolvedOptions = Required<RenderOptions>;
 
 const DEFAULT_OPTIONS: ResolvedOptions = {
   resolution: '1080p',
-  fps: 30,
+  // 24 rather than 30: a narrated classroom is mostly slow motion, where the
+  // extra frames cost a fifth of the wall time and buy nothing visible. The
+  // dialog keeps 30/60 as presets and accepts any rate the render service takes
+  // (1–120), so a submission spec asking for 25fps is not a dead end.
+  fps: 24,
   quality: 'standard',
   burnInSubtitles: false,
 };
@@ -80,6 +111,50 @@ interface JobStatusResponse {
   currentStage?: string;
   error?: string;
   done?: boolean;
+  /**
+   * End-to-end wall time of a terminal job, reported by the render service:
+   * submission (queue wait + extraction included) to the finished MP4. This is
+   * the number worth recording — a client-measured duration also contains the
+   * browser-side ZIP compile, which is not what makes a render slow.
+   */
+  elapsedMs?: number;
+}
+
+/**
+ * Last completed export's duration, persisted so it survives a page reload.
+ * Deliberately a single record: the durable, comparable history is the render
+ * service's own metrics ledger, one line per render with the configuration
+ * that produced it.
+ */
+const LAST_EXPORT_STORAGE_KEY = 'maic:video-render:last-export';
+
+interface LastExportRecord {
+  /** Render-service wall time in ms. */
+  elapsedMs: number;
+  /** When it finished, epoch ms. */
+  at: number;
+  filename: string;
+}
+
+function readLastExport(): LastExportRecord | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(LAST_EXPORT_STORAGE_KEY) ?? 'null',
+    ) as LastExportRecord | null;
+    return parsed && typeof parsed.elapsedMs === 'number' && parsed.elapsedMs >= 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastExport(record: LastExportRecord): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(LAST_EXPORT_STORAGE_KEY, JSON.stringify(record));
+  } catch {
+    // Private mode / quota: the in-memory value is still shown this session.
+  }
 }
 
 interface VideoRenderState {
@@ -88,6 +163,12 @@ interface VideoRenderState {
   percent: number;
   /** Estimated milliseconds remaining, or null while unknown. */
   etaMs: number | null;
+  /**
+   * Wall time of the last successful export (ms), as reported by the render
+   * service. Shown after a render so the cost of an option change (fps,
+   * quality, chunk parallelism) is visible instead of guessed.
+   */
+  lastElapsedMs: number | null;
   filename: string | null;
   error: string | null;
   /**
@@ -99,8 +180,25 @@ interface VideoRenderState {
   setOptions: (patch: Partial<ResolvedOptions>) => void;
   /** True while a render is in flight (compiling or rendering). */
   isActive: () => boolean;
-  /** `locale` is the export's, not the store's: it is baked into the emitted card chrome. */
-  startRender: (t: Translate, locale: Locale) => Promise<void>;
+  /**
+   * `locale` is the export's, not the store's: it is baked into the emitted
+   * card chrome.
+   *
+   * `saveTarget` must be resolved by the caller from its click handler — the
+   * folder picker needs the click's user activation, and a render finishes
+   * long after that window closes. Defaults to the browser download folder so
+   * non-interactive callers (and tests) still save.
+   */
+  /**
+   * `brandName` heads the emitted project and its README. The store cannot read
+   * the brand context, so the caller passes it from `useBrand()`.
+   */
+  startRender: (
+    t: Translate,
+    locale: Locale,
+    saveTarget?: SaveTarget,
+    brandName?: string,
+  ) => Promise<void>;
   reset: () => void;
 }
 
@@ -146,6 +244,7 @@ export const useVideoRenderStore = create<VideoRenderState>()((set, get) => ({
   status: 'idle',
   percent: 0,
   etaMs: null,
+  lastElapsedMs: readLastExport()?.elapsedMs ?? null,
   filename: null,
   error: null,
   options: DEFAULT_OPTIONS,
@@ -168,7 +267,7 @@ export const useVideoRenderStore = create<VideoRenderState>()((set, get) => ({
     set({ status: 'idle', percent: 0, etaMs: null, filename: null, error: null });
   },
 
-  startRender: async (t, locale) => {
+  startRender: async (t, locale, saveTarget = { kind: 'browser' }, brandName) => {
     // Guard against a duplicate submit — the whole reason state lives here.
     if (inFlight(get().status)) return;
 
@@ -217,7 +316,12 @@ export const useVideoRenderStore = create<VideoRenderState>()((set, get) => ({
         const revision = exportRevision;
         const compileStageId = useStageStore.getState().stage?.id;
         const { buildExportZip } = await import('@/lib/video-export-app/build-export-zip');
-        built = await buildExportZip({ resolution, burnInSubtitles, locale });
+        built = await buildExportZip({
+          resolution,
+          burnInSubtitles,
+          locale,
+          ...(brandName ? { brandName } : {}),
+        });
         // Changes during compilation (including reset or switching away and
         // back) cannot repopulate the retry slot with an obsolete snapshot.
         if (compileStageId && revision === exportRevision) {
@@ -264,6 +368,14 @@ export const useVideoRenderStore = create<VideoRenderState>()((set, get) => ({
     // (surface the error instead of an unsolicited download). null = fetch threw.
     let submitStatus: number | null = null;
     let submitReason: string | undefined;
+    // Wall time reported by the render service for the finished job. The
+    // client-measured fallback is only for an older service that omits it, and
+    // it necessarily includes the browser-side ZIP compile.
+    let serverElapsedMs: number | null = null;
+    // How long to keep polling, from the service's advertised job deadline. It
+    // is per-submit: a queue wait counts against the same deadline.
+    let pollBudgetMs = FALLBACK_POLL_BUDGET_MS;
+    const startedAtMs = Date.now();
 
     try {
       const form = new FormData();
@@ -279,9 +391,28 @@ export const useVideoRenderStore = create<VideoRenderState>()((set, get) => ({
         intervalMs: POLL_INTERVAL_MS,
         maxAttempts: MAX_POLL_ATTEMPTS,
         submit: async () => {
-          const res = await fetch('/api/export-video/render', { method: 'POST', body: form });
+          // The course name travels beside the multipart body, not inside it:
+          // the submit route forwards the body verbatim, so it can only learn
+          // the name from headers. Percent-encoded because a title is Chinese.
+          // The delivery worker uses it as the cloud folder name.
+          const res = await fetch('/api/export-video/render', {
+            method: 'POST',
+            body: form,
+            headers: {
+              'x-deliver-title': encodeURIComponent(stageName),
+              'x-deliver-filename': encodeURIComponent(filename),
+              // The round the video belongs to, so it lands in the same `v<n>/`
+              // as the delivery pack exported for the same handover.
+              'x-deliver-revision': String(peekDeliveryRevision()),
+              // MP4 delivery is queued server-side by job id, so the operator's
+              // "upload to cloud" switch (Settings → 通用) has to be carried
+              // here; there is no later point at which it could be applied.
+              ...(useSettingsStore.getState().deliverToCloud ? {} : { 'x-deliver-cloud': '0' }),
+            },
+          });
           const data = (await res.json().catch(() => ({}))) as {
             jobId?: string;
+            deadlineMs?: number;
             error?: string;
             details?: string;
             reason?: string;
@@ -292,10 +423,19 @@ export const useVideoRenderStore = create<VideoRenderState>()((set, get) => ({
             const detail = [data.error, data.details].filter(Boolean).join(': ');
             return { status: 'failed', message: detail || `HTTP ${res.status}` };
           }
+          if (typeof data.deadlineMs === 'number' && data.deadlineMs > 0) {
+            pollBudgetMs = Math.min(data.deadlineMs + DEADLINE_GRACE_MS, MAX_POLL_BUDGET_MS);
+          }
           submittedJobId = data.jobId;
           return { status: 'submitted', taskId: data.jobId };
         },
         poll: async (jobId) => {
+          // Past the service's deadline plus assembly slack the job will never
+          // report success, so stop waiting instead of burning the attempt cap.
+          if (Date.now() - startedAtMs > pollBudgetMs) {
+            const minutes = Math.round(pollBudgetMs / 60_000);
+            return { status: 'failed', message: `render exceeded its ${minutes}m budget` };
+          }
           const res = await fetch(`/api/export-video/render/${jobId}`);
           const data = (await res.json().catch(() => ({}))) as JobStatusResponse;
           if (!res.ok) return { status: 'failed', message: data.error || `HTTP ${res.status}` };
@@ -325,6 +465,9 @@ export const useVideoRenderStore = create<VideoRenderState>()((set, get) => ({
           set({ percent, etaMs });
 
           if (data.status === 'succeeded') {
+            if (typeof data.elapsedMs === 'number' && data.elapsedMs >= 0) {
+              serverElapsedMs = data.elapsedMs;
+            }
             const dl = await fetch(`/api/export-video/render/${jobId}/download`);
             if (!dl.ok) return { status: 'failed', message: `download HTTP ${dl.status}` };
             return { status: 'done', result: await dl.blob() };
@@ -336,9 +479,25 @@ export const useVideoRenderStore = create<VideoRenderState>()((set, get) => ({
         },
       });
 
-      saveAs(mp4, filename);
+      await writeSaveTarget(saveTarget, filename, mp4);
+      // Keep the bytes where the delivery export can find them: it runs minutes
+      // later, and the render service keeps neither the job record nor the file
+      // across a container restart. Fire-and-forget — a browser that refuses
+      // 45 MB of quota must not turn a finished render into a failure.
+      void measureVideoDuration(mp4).then((durationSec) =>
+        saveRenderedVideo(stageId ?? '', mp4, {
+          filename,
+          width: VIDEO_RESOLUTIONS[resolution].width,
+          height: VIDEO_RESOLUTIONS[resolution].height,
+          fps,
+          quality,
+          durationSec,
+        }),
+      );
       invalidateCachedZip();
-      set({ status: 'succeeded', percent: 100, etaMs: 0 });
+      const elapsedMs = serverElapsedMs ?? Date.now() - startedAtMs;
+      writeLastExport({ elapsedMs, at: Date.now(), filename });
+      set({ status: 'succeeded', percent: 100, etaMs: 0, lastElapsedMs: elapsedMs });
       toast.success(t('export.videoMp4Success'), { id: toastId });
       if (missingCount > 0 || errorCount > 0) {
         toast.warning(t('export.videoWarnings', { assets: missingCount, diagnostics: errorCount }));
@@ -353,7 +512,9 @@ export const useVideoRenderStore = create<VideoRenderState>()((set, get) => ({
         // a ZIP the user didn't ask for, so the failure is honest and retryable.
         const unavailable = submitStatus == null || submitStatus === 501;
         if (unavailable) {
-          saveAs(zipBlob, `${sanitizeFilename(stageName)}-video.zip`);
+          // Same destination as the MP4 would have used: the chosen folder
+          // holds whichever artefact the render actually produced.
+          await writeSaveTarget(saveTarget, `${sanitizeFilename(stageName)}-video.zip`, zipBlob);
           invalidateCachedZip();
           set({ status: 'idle', percent: 0, etaMs: null });
           toast.info(t('export.videoServiceUnavailable'), { id: toastId });

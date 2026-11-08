@@ -1,13 +1,16 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import { saveAs } from 'file-saver';
 import { toast } from 'sonner';
+import { resolveSaveTarget, writeSaveTarget, SAVE_DIR_IDS } from '@/lib/download/save-target';
 import { useStageStore } from '@/lib/store/stage';
 import { useI18n } from '@/lib/hooks/use-i18n';
+import { useBrand } from '@/lib/brand/brand-context';
 import { createLogger } from '@/lib/logger';
 import type { Scene } from '@/lib/types/stage';
 import type { LegacySpeechAction } from '@/lib/types/action';
+import { resolveAigcIdentifiers } from '@/lib/video-export/aigc-label';
+import { isAigcLabelEnabled } from '@/lib/config/aigc-label-preference';
 import {
   STANDALONE_PLAYER_STRING_KEYS,
   type StandalonePlayerStrings,
@@ -64,11 +67,20 @@ export interface ExportHtmlOptions {
 export function useExportHtml() {
   const [exporting, setExporting] = useState(false);
   const { t, locale } = useI18n();
+  // The exported file is handed to this deployment's learners, so it names
+  // this deployment rather than the product it was built from.
+  const brand = useBrand();
 
   const exportStandaloneHtml = useCallback(
     async ({ includeNarration }: ExportHtmlOptions) => {
       const { stage, scenes } = useStageStore.getState();
       if (!stage?.id || scenes.length === 0) return;
+
+      // Resolve the destination before anything else awaits: the folder picker
+      // needs the click's user activation, which the dynamic import below (and
+      // the build itself) would consume.
+      const target = await resolveSaveTarget(SAVE_DIR_IDS.html);
+      if (!target) return;
 
       setExporting(true);
       const toastId = toast.loading(t('export.exporting'));
@@ -81,9 +93,14 @@ export function useExportHtml() {
         const strings = Object.fromEntries(
           STANDALONE_PLAYER_STRING_KEYS.map((key) => [key, t(`export.htmlPlayer.${key}`)]),
         ) as StandalonePlayerStrings;
-        // Anyone with the link can open the classroom, so PBL scenes always
-        // link back to it on this deployment.
-        const classroomUrl = classroomUrlFor(window.location.origin, stage.id);
+        // Anyone with the link can open the classroom, so PBL scenes link back
+        // to it on this deployment — but only a PBL scene renders that link.
+        // Writing the address into a lesson without one puts the exporter's own
+        // host into a file that opens on someone else's machine, where
+        // `localhost:3100` is a dead link and reads as a broken handover.
+        const classroomUrl = scenes.some((scene) => scene.content.type === 'pbl')
+          ? classroomUrlFor(window.location.origin, stage.id)
+          : undefined;
 
         const {
           format,
@@ -99,12 +116,40 @@ export function useExportHtml() {
           lang: locale,
           classroomUrl,
           includeNarration,
+          // The narrated and silent variants of one lesson would otherwise be
+          // saved under the same name; the cloud folder would show
+          // `Lesson.html` next to `Lesson(1).html` with no way to tell which
+          // one has audio. Only the narrated file is marked — the silent one
+          // keeps the plain name.
+          ...(includeNarration ? { nameSuffix: t('export.htmlNarrationSuffix') } : {}),
+          // The file leaves the app as a distributable copy of generated
+          // content, so it carries both halves of the AIGC notice (§6.1) —
+          // unless the operator recorded that this order carries them
+          // elsewhere (see `aigc-label-preference`).
+          aigc: isAigcLabelEnabled()
+            ? {
+                label: t('export.aigcLabel'),
+                ...resolveAigcIdentifiers(
+                  // §6.1 wants the service provider's name. A branded deployment
+                  // *is* the provider, so its brand stands in until the operator
+                  // names a legal entity explicitly.
+                  process.env.NEXT_PUBLIC_AIGC_PROVIDER || brand.productName,
+                  process.env.NEXT_PUBLIC_AIGC_CONTENT_ID,
+                  stage.id,
+                ),
+              }
+            : undefined,
           // Too large for one file: the page plus its media folders, zipped.
           format: 'auto',
           zipReadme: t('export.htmlZipReadme'),
+          generator: brand.productName,
         });
 
-        saveAs(blob, fileName);
+        // The file name distinguishes the two variants ("…-带旁白.html"), but the
+        // cloud folder must stay the course: deriving it from the file name put
+        // the narrated copy in a sibling folder of its own lesson, so the buyer
+        // holding the course link saw only the silent one.
+        await writeSaveTarget(target, fileName, blob, { deliveryTitle: stage.name });
 
         const partialCount = inlineFailures.length + unresolvedMedia.length;
         // Bundling failures and missing narration are different problems, so
@@ -175,7 +220,7 @@ export function useExportHtml() {
         setExporting(false);
       }
     },
-    [t, locale],
+    [t, locale, brand.productName],
   );
 
   return { exporting, exportStandaloneHtml };

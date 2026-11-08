@@ -103,6 +103,20 @@ export interface SettingsState {
   /** Always open the outline review before generating scenes. */
   reviewOutlineEnabled: boolean;
 
+  /**
+   * Whether exported deliverables are also queued for cloud delivery.
+   *
+   * On by default: the seller's Aliyun Drive copy is what the customer is
+   * actually sent, so an export that never reaches it is half a handover. It
+   * is switchable because the operator sometimes exports a deck just to look
+   * at a page, and those drafts would otherwise pile up as extra `v<n>/`
+   * rounds in the customer's shared folder.
+   *
+   * It gates *new* exports only — work already queued keeps going, since the
+   * row is what the worker follows.
+   */
+  deliverToCloud: boolean;
+
   // Playback controls
   ttsMuted: boolean;
   ttsVolume: number; // 0-1, actual volume level
@@ -154,6 +168,7 @@ export interface SettingsState {
   setTTSSpeed: (speed: number) => void;
   setASRLanguage: (language: string) => void;
   setReviewOutlineEnabled: (enabled: boolean) => void;
+  setDeliverToCloud: (enabled: boolean) => void;
 
   // Playback actions
   setTTSMuted: (muted: boolean) => void;
@@ -185,6 +200,7 @@ const PERSISTED_FIELDS = [
   'ttsSpeed',
   'asrLanguage',
   'reviewOutlineEnabled',
+  'deliverToCloud',
   'ttsMuted',
   'ttsVolume',
   'autoPlayLecture',
@@ -265,6 +281,7 @@ export const useSettingsStore = create<SettingsState>()(
       // 留空后在录音时解析界面语言，避免初次加载或后续切换语言时固定为中文。
       asrLanguage: '',
       reviewOutlineEnabled: false,
+      deliverToCloud: true,
 
       // Playback controls
       ttsMuted: false,
@@ -291,6 +308,7 @@ export const useSettingsStore = create<SettingsState>()(
       setTTSSpeed: (speed) => set({ ttsSpeed: speed }),
       setASRLanguage: (language) => set({ asrLanguage: language }),
       setReviewOutlineEnabled: (enabled) => set({ reviewOutlineEnabled: enabled }),
+      setDeliverToCloud: (enabled) => set({ deliverToCloud: enabled }),
 
       setTTSMuted: (muted) => set({ ttsMuted: muted }),
       setTTSVolume: (volume) => set({ ttsVolume: Math.max(0, Math.min(1, volume)) }),

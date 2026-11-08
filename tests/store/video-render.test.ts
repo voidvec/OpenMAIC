@@ -148,7 +148,6 @@ describe('video render failure presentation and lifecycle', () => {
     ['poll-http-error', 'Internal gateway: https://internal.example/render'],
     ['poll-network-error', 'Failed to fetch'],
     ['download-failed', 'download HTTP 502'],
-    ['timeout', 'render-video timed out after 1200 polls'],
   ])('keeps %s generic and still cancels the accepted job', async (kind, message) => {
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (init?.method === 'POST') return Response.json({ jobId: 'job-1' }, { status: 202 });
@@ -161,18 +160,44 @@ describe('video render failure presentation and lifecycle', () => {
           ? { status: 'failed', error: message }
           : kind === 'job-cancelled'
             ? { status: 'cancelled', error: message }
-            : { status: kind === 'timeout' ? 'running' : 'succeeded' },
+            : { status: 'succeeded' },
       );
     });
     const pending = start();
     await vi.dynamicImportSettled();
-    await vi.advanceTimersByTimeAsync(kind === 'timeout' ? 3_600_000 : 3000);
+    await vi.advanceTimersByTimeAsync(3000);
     await pending;
     expect(fetchMock).toHaveBeenCalledWith('/api/export-video/render/job-1', { method: 'DELETE' });
     expect(mocks.error).toHaveBeenCalledWith('export.videoFailed', {
       id: 'render-toast',
     });
     expect(useVideoRenderStore.getState()).toMatchObject({ status: 'failed', error: message });
+    expect(mocks.saveAs).not.toHaveBeenCalled();
+  });
+
+  it('waits for the deadline the service advertises instead of a fixed ceiling', async () => {
+    // 3s deadline + the 5-minute assembly grace = a 5-minute wait budget. With
+    // the previous fixed 60-minute ceiling this poll loop would have kept going.
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        return Response.json({ jobId: 'job-1', deadlineMs: 3000 }, { status: 202 });
+      }
+      if (init?.method === 'DELETE') return Response.json({ cancelled: true });
+      if (url.endsWith('/download')) return new Response(null, { status: 502 });
+      return Response.json({ status: 'running', progress: 0.4 });
+    });
+    const pending = start();
+    await vi.dynamicImportSettled();
+    await vi.advanceTimersByTimeAsync(303_000);
+    // Still inside the budget: no cancellation yet.
+    expect(fetchMock.mock.calls.filter((args) => args[1]?.method === 'DELETE')).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(3000);
+    await pending;
+    expect(fetchMock).toHaveBeenCalledWith('/api/export-video/render/job-1', { method: 'DELETE' });
+    expect(useVideoRenderStore.getState()).toMatchObject({
+      status: 'failed',
+      error: 'render exceeded its 5m budget',
+    });
     expect(mocks.saveAs).not.toHaveBeenCalled();
   });
 

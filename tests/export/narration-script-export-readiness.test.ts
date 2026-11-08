@@ -64,13 +64,16 @@ describe('useExportScript readiness', () => {
     expect(mocks.success).not.toHaveBeenCalled();
   });
 
-  it('downloads when all current generation work is terminal', () => {
+  it('downloads when all current generation work is terminal', async () => {
     const { exportScriptMd } = useExportScript();
 
     mocks.mediaState.tasks = { failedImage: { status: 'failed' } };
     exportScriptMd();
 
-    expect(mocks.saveAs).toHaveBeenCalledOnce();
+    // Resolving the save destination (the folder picker) puts one microtask
+    // between the click and the save, so wait for it instead of asserting
+    // synchronously. `exportScriptMd` returns void by design.
+    await vi.waitFor(() => expect(mocks.saveAs).toHaveBeenCalledOnce());
     expect(mocks.success).toHaveBeenCalledWith('export.exportSuccess');
   });
 });

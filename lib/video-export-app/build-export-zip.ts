@@ -14,8 +14,15 @@
  *
  * App-side / impure: reads the store + Dexie and does IO.
  */
-import { compileVideoTimeline, emitHyperframes, toSrt, toVtt } from '@/lib/video-export';
+import {
+  compileVideoTimeline,
+  emitHyperframes,
+  resolveAigcIdentifiers,
+  toSrt,
+  toVtt,
+} from '@/lib/video-export';
 import { useStageStore } from '@/lib/store';
+import { isAigcLabelEnabled } from '@/lib/config/aigc-label-preference';
 import type { Locale } from '@/lib/i18n';
 import { resolveExportStageName } from './resolve-stage-name';
 import { createVideoTimelineDeps } from './timeline-deps';
@@ -80,6 +87,8 @@ async function compileStageIr(options: {
 }): Promise<{
   ir: ReturnType<typeof compileVideoTimeline>;
   stageName: string;
+  /** The classroom id — also the per-content number on the AIGC label. */
+  stageId: string;
   scenes: ReturnType<typeof useStageStore.getState>['scenes'];
   deps: Awaited<ReturnType<typeof createVideoTimelineDeps>>;
 }> {
@@ -117,7 +126,7 @@ async function compileStageIr(options: {
     },
   );
 
-  return { ir, stageName, scenes, deps };
+  return { ir, stageName, stageId: stage.id, scenes, deps };
 }
 
 /** Options for a full export-ZIP build. */
@@ -127,6 +136,12 @@ export interface BuildExportZipOptions {
   burnInSubtitles?: boolean;
   /** Locale the card chrome and the emitted document are written in. */
   locale: Locale;
+  /**
+   * Product name the emitted project and its README are headed with. The ZIP
+   * reaches this deployment's learners, so a white-labelled install passes its
+   * own name. Omitted keeps the shipped one.
+   */
+  brandName?: string;
 }
 
 /**
@@ -136,7 +151,7 @@ export interface BuildExportZipOptions {
 export async function buildExportZip(
   options: BuildExportZipOptions,
 ): Promise<BuildExportZipResult> {
-  const { resolution, burnInSubtitles = false, locale } = options;
+  const { resolution, burnInSubtitles = false, locale, brandName } = options;
   const { width, height } = VIDEO_RESOLUTIONS[resolution];
 
   // Resolve the chrome before the first await: compiling the IR takes seconds
@@ -147,13 +162,26 @@ export async function buildExportZip(
   const cta = configuredVideoExportCta();
 
   // 1. DI deps (Dexie durations + asset presence + measured geometry) → 2. pure compile.
-  const { ir, stageName, scenes, deps } = await compileStageIr({
+  const { ir, stageName, stageId, scenes, deps } = await compileStageIr({
     resolution,
     locale,
     labels,
   });
 
-  // 3. emit the Hyperframes project text.
+  // 3. emit the Hyperframes project text. Every ZIP a user receives carries the
+  // mandatory AIGC label: the deployment names itself through the provider
+  // variable, and the classroom id is the per-content number (§6.1). The switch
+  // in `aigc-label-preference` is the operator's recorded decision to carry the
+  // notice outside the file; it defaults to on and is never silent.
+  const aigc = isAigcLabelEnabled()
+    ? resolveAigcIdentifiers(
+        // §6.1 wants the service provider's name, and a branded deployment is
+        // the provider until the operator names a legal entity explicitly.
+        process.env.NEXT_PUBLIC_AIGC_PROVIDER || brandName,
+        process.env.NEXT_PUBLIC_AIGC_CONTENT_ID,
+        stageId,
+      )
+    : null;
   const project = emitHyperframes(ir, {
     width,
     height,
@@ -161,6 +189,8 @@ export async function buildExportZip(
     labels,
     locale,
     cta,
+    aigc,
+    ...(brandName ? { brandName } : {}),
   });
 
   // 4. collect asset bytes (slide snapshots + narration/media).
