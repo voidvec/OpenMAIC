@@ -18,6 +18,8 @@ services:
         - NEXT_PUBLIC_SHOW_VOCATIONAL_TEST_UI=${NEXT_PUBLIC_SHOW_VOCATIONAL_TEST_UI:-}
         - NEXT_PUBLIC_ENABLE_VIDEO_EXPORT=${NEXT_PUBLIC_ENABLE_VIDEO_EXPORT:-}
         - NEXT_PUBLIC_VIDEO_EXPORT_CTA_DESTINATION=${NEXT_PUBLIC_VIDEO_EXPORT_CTA_DESTINATION:-}
+        - NEXT_PUBLIC_AIGC_PROVIDER=${NEXT_PUBLIC_AIGC_PROVIDER:-}
+        - NEXT_PUBLIC_AIGC_CONTENT_ID=${NEXT_PUBLIC_AIGC_CONTENT_ID:-}
         - NEXT_PUBLIC_ENABLE_PPTX_IMPORT=${NEXT_PUBLIC_ENABLE_PPTX_IMPORT:-}
         - NEXT_PUBLIC_PRO_WORKBENCH_ENABLED=${NEXT_PUBLIC_PRO_WORKBENCH_ENABLED:-}
     # Published on loopback by default: the single-user owner (see
@@ -139,6 +141,20 @@ services:
       # RENDER_MAX_QUEUE cap. Set this >0 only with a trusted proxy supplying
       # per-user identity (see render-service/README.md).
       - RENDER_MAX_JOBS_PER_USER=0
+      # Append-only timing ledger: one JSON line per finished render, carrying
+      # the wall time, the executor's stage breakdown, and the chunk settings
+      # that produced it. This is the only place an export's duration survives a
+      # restart (JobStore is in memory and container logs rotate), so a
+      # before/after comparison of a config change needs it. Defaults to the
+      # container's /tmp; bind a host directory over the parent to keep it.
+      - RENDER_METRICS_PATH=${RENDER_METRICS_PATH:-/tmp/openmaic-render-metrics.jsonl}
+      # Implicit AIGC label (GB 45438-2025 §6.1): the service's own name and a
+      # content number written into the MP4 container on top of the visible
+      # corner label burned into the frames. Unset = no metadata claim. The
+      # content id defaults to the render job id (one number per export); set
+      # it to a deployment-wide code if your numbering lives elsewhere.
+      - AIGC_PROVIDER=${AIGC_PROVIDER:-}
+      - AIGC_CONTENT_ID=${AIGC_CONTENT_ID:-}
       - RENDER_PREVIEW_TIMEOUT_MS=${RENDER_PREVIEW_TIMEOUT_MS:-20000}
       # Separate Chromium capacity: previews can run alongside a video export.
       - RENDER_PREVIEW_MAX_CONCURRENCY=${RENDER_PREVIEW_MAX_CONCURRENCY:-1}

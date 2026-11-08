@@ -119,6 +119,116 @@ describe.skipIf(!REQUIRED)('frozen interactive HTML in Chromium', () => {
     }
   });
 
+  it('clears a dialog layer and paints the board it was covering', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+    try {
+      await load(
+        page,
+        await emittedFixture(`<!doctype html><html><head>
+          <style>
+            .overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(7,13,25,.86);z-index:10}
+            .overlay.hidden{display:none}
+          </style>
+        </head><body>
+          <canvas id="board" width="200" height="200"></canvas>
+          <div class="overlay hidden" id="overlay-done"><button>再玩一次</button></div>
+          <div class="overlay" id="overlay-start"><button class="primary" onclick="startGame()">开始探案</button></div>
+          <script>
+            // The board only starts drawing once the rules card is dismissed, so
+            // a pack that froze with the card up would keep an empty canvas and
+            // never reveal that the click happened.
+            function startGame() {
+              document.getElementById('overlay-start').classList.add('hidden');
+              var canvas = document.getElementById('board');
+              var ctx = canvas.getContext('2d');
+              (function draw() {
+                ctx.fillStyle = '#38bdf8';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                requestAnimationFrame(draw);
+              })();
+            }
+          </script></body></html>`),
+      );
+
+      await page.waitForFunction(() => {
+        return (
+          document
+            .querySelector('[data-interactive-static-host]')
+            ?.getAttribute('data-interactive-static-state') === 'frozen'
+        );
+      });
+
+      const child = page.frames().find((frame) => frame !== page.mainFrame())!;
+      const result = await child.evaluate(() => {
+        const canvas = document.querySelector<HTMLCanvasElement>('#board')!;
+        const pixels = canvas
+          .getContext('2d')!
+          .getImageData(0, 0, canvas.width, canvas.height).data;
+        let painted = 0;
+        for (let i = 3; i < pixels.length; i += 4) if (pixels[i] > 8) painted += 1;
+        const start = document.querySelector<HTMLElement>('#overlay-start')!;
+        const done = document.querySelector<HTMLElement>('#overlay-done')!;
+        return {
+          state: document.documentElement.getAttribute('data-openmaic-static-state'),
+          cleared: document.documentElement.getAttribute('data-openmaic-static-dialogs'),
+          startDisplay: getComputedStyle(start).display,
+          doneDisplay: getComputedStyle(done).display,
+          painted,
+          total: canvas.width * canvas.height,
+        };
+      });
+
+      expect(result.state).toBe('frozen');
+      // Only the visible layer is touched; the hidden one stays as authored.
+      expect(result.cleared).toBe('overlay-start');
+      expect(result.startDisplay).toBe('none');
+      expect(result.doneDisplay).toBe('none');
+      expect(result.painted).toBe(result.total);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it('leaves a small named layer alone instead of clicking its control', async () => {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+    try {
+      await load(
+        page,
+        await emittedFixture(`<!doctype html><html><head>
+          <style>
+            .modal{position:absolute;left:40px;bottom:40px;width:220px;height:120px;background:#1e293b;color:#fff}
+          </style>
+        </head><body>
+          <p id="lesson">Lesson body</p>
+          <div class="modal" id="widget"><button class="primary" onclick="window.__clicked = true">Open chat</button></div>
+          <script>window.__clicked = false;</script>
+        </body></html>`),
+      );
+
+      await page.waitForFunction(() => {
+        return (
+          document
+            .querySelector('[data-interactive-static-host]')
+            ?.getAttribute('data-interactive-static-state') === 'frozen'
+        );
+      });
+
+      const child = page.frames().find((frame) => frame !== page.mainFrame())!;
+      const result = await child.evaluate(() => ({
+        clicked: (window as typeof window & { __clicked?: boolean }).__clicked,
+        cleared: document.documentElement.getAttribute('data-openmaic-static-dialogs'),
+      }));
+
+      // Naming alone is not enough: a dialog-sized layer is what hides the
+      // lesson, while a small named panel is a page's own furniture. Clicking
+      // its control would change the scene instead of revealing it.
+      expect(result.clicked).toBe(false);
+      expect(result.cleared).toBeNull();
+    } finally {
+      await page.close();
+    }
+  });
+
   it('creates a standards-mode head without corrupting head-like script text', async () => {
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     try {

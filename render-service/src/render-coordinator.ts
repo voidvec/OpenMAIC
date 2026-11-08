@@ -10,6 +10,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { ArtifactStore } from './artifact-store.js';
+import { stampAigcMetadata } from './aigc-metadata.js';
 import { config } from './config.js';
 import type { JobStore } from './job-store.js';
 import type { RenderExecutor } from './render-executor.js';
@@ -23,6 +24,7 @@ import type {
   RenderJobRecord,
   RenderOptions,
   RenderOwnerId,
+  RenderPerformanceSummary,
   RenderResourceSettlement,
 } from './types.js';
 
@@ -53,6 +55,32 @@ function planPathForProject(dir: string): string {
     dirname(dir),
     `.render-plan-${createHash('sha256').update(dir).digest('hex').slice(0, 12)}`,
   );
+}
+
+/**
+ * Flatten an executor's stage map into the event's fixed vocabulary.
+ *
+ * The executor reports `stages` as an open record (the chunk executor's
+ * `planMs`/`chunksMs`/`assembleMs`, the producer's own phase names), so the
+ * mapping is explicit: an unknown stage must not become an unbounded, unbounded-
+ * cardinality key on the operational log line.
+ */
+function stageTimings(performance: RenderPerformanceSummary | undefined): {
+  planMs?: number;
+  chunksMs?: number;
+  assembleMs?: number;
+  totalFrames?: number;
+} {
+  if (!performance) return {};
+  const { planMs, chunksMs, assembleMs } = performance.stages;
+  return {
+    ...(typeof planMs === 'number' ? { planMs } : {}),
+    ...(typeof chunksMs === 'number' ? { chunksMs } : {}),
+    ...(typeof assembleMs === 'number' ? { assembleMs } : {}),
+    ...(typeof performance.totalFrames === 'number'
+      ? { totalFrames: performance.totalFrames }
+      : {}),
+  };
 }
 
 /** An accepted admission slot, returned by RenderCoordinator.reserve. */
@@ -279,7 +307,12 @@ export class RenderCoordinator {
    * Close a job's lifecycle in the log. Also drops its submission timestamp so
    * the map cannot grow without bound across a long-lived process.
    */
-  private finishEvent(id: string, outcome: RenderOutcome, errorCode?: string): void {
+  private finishEvent(
+    id: string,
+    outcome: RenderOutcome,
+    errorCode?: string,
+    performance?: RenderPerformanceSummary,
+  ): void {
     // Deleting the timing entry is also what makes this idempotent. A terminal
     // job-store write can reject *after* an outcome is known, which lands in the
     // caller's catch and would otherwise close the same job a second time with a
@@ -300,6 +333,7 @@ export class RenderCoordinator {
             queueWaitMs: timing.startedAt - timing.submittedAt,
             renderMs: now - timing.startedAt,
           }),
+      ...stageTimings(performance),
       ...(errorCode === undefined ? {} : { errorCode }),
     });
   }
@@ -319,6 +353,7 @@ export class RenderCoordinator {
       id,
       result.status,
       result.status === 'failed' ? result.failure.code : undefined,
+      result.performance,
     );
     try {
       await this.jobs.update(id, {
@@ -409,6 +444,23 @@ export class RenderCoordinator {
         return;
       }
 
+      // The container-level half of the AIGC label (§6.1), after the visible
+      // corner label the emitter burns into the frames. Best-effort: a failed
+      // remux leaves the export exactly as the producer wrote it, so it is
+      // logged as a warning and never turns a finished render into a failure.
+      if (config.aigcProvider) {
+        const stamped = await stampAigcMetadata({
+          filePath: outputPath,
+          metadata: { provider: config.aigcProvider, contentId: config.aigcContentId ?? id },
+        });
+        if (!stamped) {
+          console.warn('AIGC metadata was not written into the export:', {
+            jobId: id,
+            provider: config.aigcProvider,
+          });
+        }
+      }
+
       await this.artifacts.put(id, outputPath);
       await this.jobs.update(id, {
         status: 'succeeded',
@@ -421,7 +473,7 @@ export class RenderCoordinator {
       });
       // Emitted last: until the terminal write lands, "succeeded" is not yet
       // true, and the catch below would drop the artifact this event describes.
-      this.finishEvent(id, 'succeeded');
+      this.finishEvent(id, 'succeeded', undefined, result.performance);
     } catch (error) {
       const publicationCommitted = resources?.published === true;
       if (publicationCommitted) {

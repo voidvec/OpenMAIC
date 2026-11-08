@@ -100,6 +100,37 @@ describe('render job lifecycle events', () => {
     expect(typeof events[2]!.durationMs).toBe('number');
   });
 
+  it('reports the executor stage breakdown on a finished render', async () => {
+    const events: RenderEvent[] = [];
+    const { coordinator, jobs } = coordinatorWith(events, async () => ({
+      status: 'succeeded',
+      outputPath: 'out.mp4',
+      performance: {
+        totalElapsedMs: 60_000,
+        stages: { planMs: 500, chunksMs: 55_000, assembleMs: 4_500 },
+        workers: 1,
+        totalFrames: 1_500,
+      },
+    }));
+
+    const id = await submitRender(coordinator, 'tester', await projectDir(), {
+      fps: 24,
+      quality: 'draft',
+      format: 'mp4',
+    });
+    await waitForJob(jobs, id, (job) => job.status === 'succeeded');
+
+    // Without the breakdown a slow export is indistinguishable from a large
+    // one, and chunk parallelism cannot be shown to have helped.
+    expect(events.find((event) => event.event === 'render_job_finished')).toMatchObject({
+      outcome: 'succeeded',
+      planMs: 500,
+      chunksMs: 55_000,
+      assembleMs: 4_500,
+      totalFrames: 1_500,
+    });
+  });
+
   it('reports a failed render with its failure code and never its message', async () => {
     const events: RenderEvent[] = [];
     const { coordinator, jobs } = coordinatorWith(events, async () => {

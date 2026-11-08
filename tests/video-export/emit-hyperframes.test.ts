@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { AIGC_LABEL_VISIBLE_SECONDS } from '@/lib/video-export/aigc-label';
 import { spotlightV1 } from '@/lib/choreography';
 import { compileVideoTimeline, emitHyperframes } from '@/lib/video-export';
 import type { AssetMeta, CompilerScene } from '@/lib/video-export';
@@ -70,6 +71,27 @@ describe('emitHyperframes', () => {
     expect(
       project.files.find((file) => file.path === 'LICENSES/Inter-OFL-1.1.txt')!.content,
     ).toContain('SIL OPEN FONT LICENSE Version 1.1');
+  });
+
+  it('heads the project and its README with the deployment brand', () => {
+    const branded = emitHyperframes(ir, { brandName: 'Acme Academy' }).files;
+    const readme = branded.find((file) => file.path === 'README.md')!.content;
+    const brandedHtml = branded.find((file) => file.path === 'index.html')!.content;
+    expect(readme).toContain('— Acme Academy video export');
+    expect(brandedHtml).toContain('— Acme Academy video</title>');
+    // The default names the product this build came from, so an unbranded
+    // deployment reads exactly as it did before the option existed.
+    expect(project.files.find((file) => file.path === 'README.md')!.content).toContain(
+      '— OpenMAIC video export',
+    );
+    expect(html).toContain('— OpenMAIC video</title>');
+  });
+
+  it('escapes the brand name in the document title', () => {
+    const brandedHtml = emitHyperframes(ir, { brandName: 'A&B<C>' }).files.find(
+      (file) => file.path === 'index.html',
+    )!.content;
+    expect(brandedHtml).toContain('— A&amp;B&lt;C&gt; video</title>');
   });
 
   it('builds one composition driven by one paused GSAP timeline', () => {
@@ -285,9 +307,16 @@ describe('emitHyperframes frozen interactive HTML', () => {
     expect(guardedHtml).toContain(
       'id="scene-2-base-content" data-interactive-static-visibility-wrapper',
     );
-    expect(guardedHtml).toMatch(
-      /id="scene-2-base-content"[^>]*style="[^"]*visibility:hidden;opacity:0[^"]*"/,
-    );
+    // Hidden by opacity, never by visibility: Chromium suspends
+    // requestAnimationFrame for a frame whose layout visibility is hidden, so a
+    // canvas-only page froze on an empty bitmap and stayed empty for the scene.
+    expect(guardedHtml).toMatch(/id="scene-2-base-content"[^>]*style="[^"]*opacity:0[^"]*"/);
+    expect(guardedHtml).not.toMatch(/id="scene-2-base-content"[^>]*style="[^"]*visibility:hidden/);
+    const interactiveFrame = guardedHtml.match(
+      /<iframe[^>]*data-interactive-static-frame[^>]*>/,
+    )?.[0];
+    expect(interactiveFrame).toBeDefined();
+    expect(interactiveFrame).not.toContain('visibility:hidden');
     expect(guardedHtml).toContain(`tl.set('#scene-2-base-content',{autoAlpha:1},${start});`);
     expect(guardedHtml).toContain(`tl.set('#scene-2-base-content',{autoAlpha:0},${end});`);
   });
@@ -1052,5 +1081,63 @@ describe('emitHyperframes determinism red-lines (hyperframes lint proxy)', () =>
   it('declares an explicit root duration and extends the timeline to it', () => {
     expect(html).toMatch(/data-duration="[\d.]+"/);
     expect(html).toMatch(/tl\.set\(\{\}, \{\}, [\d.]+\);/);
+  });
+});
+
+describe('emitHyperframes — AIGC label', () => {
+  const ir = compileSample();
+  const readHtml = (options: Parameters<typeof emitHyperframes>[1]) =>
+    emitHyperframes(ir, options).files.find((f) => f.path === 'index.html')!.content;
+
+  it('emits nothing AIGC-related when no identifiers are supplied', () => {
+    // Fixtures, measurement passes and the subtitle-only path never ship a file.
+    expect(readHtml({ width: 1920, height: 1080 })).not.toContain('aigc');
+  });
+
+  it('burns the label at the standard minimum size and hides it after the opening seconds', () => {
+    const html = readHtml({
+      width: 1920,
+      height: 1080,
+      labels: { aigc: '本内容由人工智能生成合成' },
+      aigc: { provider: 'ACME Academy', contentId: 'ACME-0001' },
+    });
+
+    expect(html).toContain('id="aigc-label"');
+    expect(html).toContain('本内容由人工智能生成合成');
+    // 1080 * 5% — GB 45438-2025 §5.4
+    expect(html).toContain('font-size:54px');
+    // Positioned in a corner, per the same clause.
+    expect(html).toContain('position:absolute');
+    expect(html).toContain('left:22px');
+    expect(html).toContain('bottom:22px');
+
+    const hideAt = Math.min(AIGC_LABEL_VISIBLE_SECONDS, ir.totalDurationMs / 1000);
+    expect(html).toContain("tl.set('#aigc-label', { opacity: 1 }, 0);");
+    expect(html).toContain(`tl.set('#aigc-label', { opacity: 0 }, ${hideAt});`);
+  });
+
+  it('writes the hidden §6.1 metadata into the document head', () => {
+    const html = readHtml({
+      width: 1280,
+      height: 720,
+      aigc: { provider: 'ACME Academy', contentId: 'ACME-0001' },
+    });
+
+    expect(html).toContain('<meta name="aigc" content="generated" />');
+    expect(html).toContain('<meta name="aigc-provider" content="ACME Academy" />');
+    expect(html).toContain('<meta name="aigc-content-id" content="ACME-0001" />');
+    // 720 * 5%
+    expect(html).toContain('font-size:36px');
+  });
+
+  it('escapes identifiers so a quote cannot break out of the attribute', () => {
+    const html = readHtml({
+      width: 1280,
+      height: 720,
+      aigc: { provider: 'A" onload="x', contentId: 'c&d' },
+    });
+
+    expect(html).toContain('<meta name="aigc-provider" content="A&quot; onload=&quot;x" />');
+    expect(html).toContain('<meta name="aigc-content-id" content="c&amp;d" />');
   });
 });

@@ -37,6 +37,10 @@ import {
   makeProjectDir as defaultMakeProjectDir,
 } from './render-coordinator.js';
 import { InProcessExecutor, type RenderExecutor } from './render-executor.js';
+// Already on this module's dependency graph through `render-executor`, so the
+// shared frame-rate set costs no extra import: it exists so admission and the
+// chunk executor cannot disagree about which rates are renderable.
+import { CHUNK_SUPPORTED_FPS } from './chunk-executor.js';
 import { InvalidProjectError, unzipProject as defaultUnzipProject } from './unzip.js';
 import { hardenProjectDirectory } from './project-html-hardening.js';
 import { capBodyStream } from './capped-stream.js';
@@ -48,6 +52,7 @@ import {
   type PreviewErrorCode,
   type RenderEventSink,
 } from './events.js';
+import { createRenderEventSink } from './render-metrics.js';
 import { PreviewGate, PreviewRejectedError } from './preview-gate.js';
 import {
   ChromiumPreviewRenderer,
@@ -243,6 +248,16 @@ function parseOptions(form: FormData): RenderOptions | string {
   const fps = Number.parseInt(String(form.get('fps') ?? '30'), 10);
   if (!Number.isFinite(fps) || fps <= 0 || fps > 120) return 'Invalid fps';
 
+  // Distributed chunk execution assembles its chunks on a 24/30/60 grid, so a
+  // typed rate — the 25fps several submission specs still ask for — is refused
+  // here, at admission, instead of by the chunk executor after the job is
+  // already accepted. Same reasoning as the bounds above: a job that dies on its
+  // first frame reads as a broken service, not as a parameter the caller got
+  // wrong, and the caller has already waited for the project to be unpacked.
+  if (config.chunkExecutionEnabled && !(CHUNK_SUPPORTED_FPS as readonly number[]).includes(fps)) {
+    return `Distributed chunk execution supports fps ${CHUNK_SUPPORTED_FPS.join(', ')}`;
+  }
+
   const quality = String(form.get('quality') ?? 'standard');
   if (quality !== 'draft' && quality !== 'standard' && quality !== 'high') {
     return 'Invalid quality (expected draft|standard|high)';
@@ -275,7 +290,7 @@ export function createApp(deps: AppDeps): Hono {
   const previewRenderer = deps.previewRenderer ?? new ChromiumPreviewRenderer();
   const previewDeadlineMs = deps.previewDeadlineMs ?? config.previewDeadlineMs;
   const previewMaxJsonBytes = deps.previewMaxJsonBytes ?? config.previewMaxJsonBytes;
-  const onEvent = deps.onEvent ?? emitRenderEvent;
+  const onEvent = deps.onEvent ?? createRenderEventSink();
   const previewGate =
     deps.previewGate ?? new PreviewGate(config.previewMaxInFlight, config.previewMaxPerUser);
   const previewExecutionGate =
@@ -377,7 +392,9 @@ export function createApp(deps: AppDeps): Hono {
         await hardenProject(projectDir);
         return coordinator.submit({ reservation, ownerId, projectDir, options });
       });
-      return c.json({ jobId }, 202);
+      // The client needs the service's own wall-clock limit to size its poll
+      // budget: a fixed client-side ceiling shorter than this abort the job.
+      return c.json({ jobId, deadlineMs: config.jobDeadlineMs }, 202);
     } catch (error) {
       coordinator.release(reservation);
       if (projectDir) await coordinator.cleanupProject(projectDir);
@@ -548,6 +565,26 @@ export function createApp(deps: AppDeps): Hono {
       framesRendered: job.framesRendered,
       totalFrames: job.totalFrames,
       metrics: job.metrics,
+      // End-to-end wall time, reported once the job is terminal: submission
+      // (including queue wait and archive extraction) to the terminal write.
+      // This is what "how long did the MP4 export take" means to a person; the
+      // executor-only figure below deliberately excludes submission work.
+      ...(isTerminal(job.status) ? { elapsedMs: job.updatedAtMs - job.createdAtMs } : {}),
+      // Executor-reported timing. `stages` partitions the render itself
+      // (plan / chunks / assemble for the chunk executor), and `totalFrames`
+      // is the denominator for frames-per-second. Numeric only — no paths or
+      // scene content — so this stays safe to relay through the app.
+      ...(job.performance
+        ? {
+            performance: {
+              totalElapsedMs: job.performance.totalElapsedMs,
+              stages: job.performance.stages,
+              workers: job.performance.workers,
+              totalFrames: job.performance.totalFrames,
+              ...(job.performance.captureMode ? { captureMode: job.performance.captureMode } : {}),
+            },
+          }
+        : {}),
       resources: job.resources && {
         published: job.resources.published,
         cleanupVerified: job.resources.cleanupVerified,
@@ -632,7 +669,11 @@ export async function startService(resourceExecutor?: RenderExecutor): Promise<v
     void artifacts.remove(record.id);
     void coordinator.cleanupProject(record.projectDir);
   });
-  coordinator = new RenderCoordinator(executor, jobs, artifacts);
+  // One sink for both halves of the lifecycle: the coordinator closes jobs
+  // (started/finished) while the routes report admission, so both must feed the
+  // same ledger or a submitted-but-rejected render would be invisible to it.
+  const onEvent = createRenderEventSink();
+  coordinator = new RenderCoordinator(executor, jobs, artifacts, { onEvent });
 
   // Build the browser mount off the request path so the first preview does not
   // pay the cold esbuild cost while holding admission and execution permits.
@@ -642,6 +683,7 @@ export async function startService(resourceExecutor?: RenderExecutor): Promise<v
     jobs,
     artifacts,
     coordinator,
+    onEvent,
     // Bounds concurrent buffering + extraction so the per-archive RAM ceiling
     // can't stack across a burst of admitted requests.
     extractionGate: new Semaphore(config.maxConcurrentExtractions),
@@ -667,6 +709,8 @@ export async function startService(resourceExecutor?: RenderExecutor): Promise<v
         `staticDedup=${process.env.HF_STATIC_DEDUP ?? 'producer-default'}, ` +
         `headlessShell=${process.env.PRODUCER_HEADLESS_SHELL_PATH ?? 'unset'}, ` +
         `requireBeginFrame=${config.requireBeginFrame}, ` +
+        `chunkExecution=${config.chunkExecutionEnabled ? `${config.chunkCount} chunks x ${config.maxParallelChunks} parallel` : 'off'}, ` +
+        `metricsPath=${config.metricsPath ?? 'off'}, ` +
         `producer=${runtimeVersions.producer}, node=${runtimeVersions.node}, ` +
         `chromium=${runtimeVersions.chromium}, ffmpeg=${runtimeVersions.ffmpeg})`,
     );

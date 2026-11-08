@@ -40,6 +40,21 @@ function boolEnv(name: string, fallback: boolean): boolean {
   return fallback;
 }
 
+/**
+ * A filesystem path, or `null` when the operator disabled the feature.
+ * An empty string means "unset" (use the default) so a blank compose line
+ * cannot silently point the writer at the process working directory.
+ */
+function pathEnv(name: string, fallback: string): string | null {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const value = raw.trim();
+  if (!value) return fallback;
+  const lowered = value.toLowerCase();
+  if (lowered === 'off' || lowered === 'false' || value === '0') return null;
+  return value;
+}
+
 const MB = 1024 * 1024;
 const resourceProfile = resolveResourceProfile();
 
@@ -102,6 +117,22 @@ export const config = {
   previewMaxJsonBytes: intEnv('RENDER_PREVIEW_MAX_JSON_BYTES', 32 * MB),
   /** Root dir for unzipped projects and rendered outputs. */
   tmpDir: process.env.PRODUCER_TMP_PROJECT_DIR || '/tmp/openmaic-renders',
+  /**
+   * Append-only ledger with one line per finished render (timing + the config
+   * that produced it). Set `off` to disable. Point it at a mounted volume so
+   * the records outlive `docker compose up --force-recreate`, which is exactly
+   * when a before/after comparison is needed.
+   */
+  metricsPath: pathEnv('RENDER_METRICS_PATH', '/tmp/openmaic-render-metrics.jsonl'),
+  /**
+   * AIGC implicit label (GB 45438-2025 §6.1): the generating service's name and
+   * the number of the content it produced, written into the MP4 container
+   * metadata alongside the visible corner label burned into the frames. The
+   * provider is what a compliant deployment must name itself as; with it unset
+   * the container carries no claim rather than the wrong one.
+   */
+  aigcProvider: process.env.AIGC_PROVIDER?.trim() || null,
+  aigcContentId: process.env.AIGC_CONTENT_ID?.trim() || null,
 
   // ---- Archive limits (ZIP-bomb / DoS guards, enforced before extraction) ----
   /** Max compressed upload size accepted (bytes). */

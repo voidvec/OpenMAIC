@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { prepareInteractiveHtmlScenes } from '@/lib/video-export-app/prepare-interactive-html';
+import {
+  INTERACTIVE_DIALOG_BUDGET_MS,
+  INTERACTIVE_DIALOG_COVERAGE,
+  INTERACTIVE_DIALOG_MAX_ROUNDS,
+  INTERACTIVE_DIALOG_MIN_FRAME_AREA,
+  INTERACTIVE_DIALOG_SELECTOR,
+  INTERACTIVE_DIALOG_SETTLE_MS,
+  INTERACTIVE_FRAME_FLUSH_MS,
+  INTERACTIVE_FRAME_INTERVAL_MS,
+} from '@/lib/video-export/interactive-static';
 import type { Scene } from '@/lib/types/stage';
 
 function scene(html?: string): Scene {
@@ -37,6 +47,74 @@ describe('prepareInteractiveHtmlScenes', () => {
     expect(html).toContain("connect-src 'none'");
     expect(html).toContain("worker-src 'none'");
     expect(html).toContain('interactive-worker-disabled');
+  });
+
+  it('drives requestAnimationFrame from a timer, so paint does not need a compositor frame', async () => {
+    const prepared = await prepareInteractiveHtmlScenes([
+      scene('<!doctype html><html><head></head><body><canvas></canvas></body></html>'),
+    ]);
+    const html = prepared.content('interactive:widget')!;
+
+    // Export capture runs Chromium with --enable-begin-frame-control, which only
+    // advances the compositor when the capture loop asks for a frame — and it
+    // does not ask while waiting for scenes to report ready. A page that paints
+    // from requestAnimationFrame therefore went blank for its whole scene, and
+    // no amount of waiting on real frames could fix it. The packaged page has to
+    // own its frame clock: queue rAF callbacks and drain them on a timer.
+    expect(html).toContain('var frameQueue = [];');
+    expect(html).toContain(`nativeSetTimeout(drainFrameQueue, ${INTERACTIVE_FRAME_INTERVAL_MS})`);
+    expect(html).toContain('frameQueue.push({ id: frameId, callback: fn });');
+    expect(html).not.toContain('nativeRaf(');
+
+    // The freeze waits for ticks of that clock, not for browser frames.
+    const budget = html.indexOf('var frameTicks = 0;');
+    expect(html.indexOf('if (frameTicks - baseTicks >= ')).toBeGreaterThan(budget);
+    expect(html.indexOf("post('frozen'")).toBeGreaterThan(budget);
+  });
+
+  it('releases a page that requests no frames instead of waiting out the budget', async () => {
+    const prepared = await prepareInteractiveHtmlScenes([
+      scene('<!doctype html><html><head></head><body><p>static</p></body></html>'),
+    ]);
+    const html = prepared.content('interactive:widget')!;
+
+    // A synchronously painted page has nothing to wait for; holding it to the
+    // frame deadline would add that wait to every such scene in the export.
+    expect(html).toContain(
+      'if (frameRequests === baseRequests && frameQueue.length === 0 && elapsed >= graceMs)',
+    );
+    expect(html).toContain(`if (elapsed >= ${INTERACTIVE_FRAME_FLUSH_MS}) return resolve();`);
+  });
+
+  it('clears a dialog layer before freezing, so the scene shows the board it covers', async () => {
+    const prepared = await prepareInteractiveHtmlScenes([
+      scene('<!doctype html><html><head></head><body><div class="overlay"></div></body></html>'),
+    ]);
+    const html = prepared.content('interactive:widget')!;
+
+    // A scene that opens on a rules card used to be frozen with the card up,
+    // which is what the viewer then saw for the whole scene. Only containers
+    // that name themselves as a dialog are eligible — clicking anything
+    // full-screen would touch a page's real controls and change the lesson.
+    expect(html).toContain(`var DIALOG_SELECTOR = ${JSON.stringify(INTERACTIVE_DIALOG_SELECTOR)};`);
+    expect(html).toContain(`var DIALOG_MAX_ROUNDS = ${INTERACTIVE_DIALOG_MAX_ROUNDS};`);
+    expect(html).toContain(`var DIALOG_SETTLE_MS = ${INTERACTIVE_DIALOG_SETTLE_MS};`);
+    expect(html).toContain(`var DIALOG_BUDGET_MS = ${INTERACTIVE_DIALOG_BUDGET_MS};`);
+    expect(html).toContain(`if (area < vw * vh * ${INTERACTIVE_DIALOG_MIN_FRAME_AREA}) continue;`);
+    expect(html).toContain(
+      `if (area < base.width * base.height * ${INTERACTIVE_DIALOG_COVERAGE}) continue;`,
+    );
+    expect(html).toContain('try { control.click(); } catch (_) {}');
+
+    // Dialog clearing runs before the paint budget starts, and both finish
+    // before the freeze posts its ready message.
+    const settle = html.indexOf('nativeSetTimeout(resolve, ');
+    const clear = html.indexOf('clearDialogs().catch(');
+    const paint = html.indexOf('var baseTicks = frameTicks;');
+    const frozen = html.indexOf("post('frozen'");
+    expect(clear).toBeGreaterThan(settle);
+    expect(paint).toBeGreaterThan(clear);
+    expect(frozen).toBeGreaterThan(paint);
   });
 
   it('keeps the doctype first when authored HTML omits an explicit head', async () => {

@@ -24,6 +24,15 @@ import type { RenderOptions, RenderProgress } from './types.js';
 import { config } from './config.js';
 
 export const CHUNK_PLAN_SCHEMA_VERSION = 1 as const;
+/**
+ * Frame rates distributed chunk execution can assemble.
+ *
+ * Chunks are planned on a fixed frame grid, so a rate outside this set has no
+ * grid to land on. Declared once and shared with the request parser, which
+ * rejects an incompatible rate at admission instead of letting an accepted job
+ * die on its first frame.
+ */
+export const CHUNK_SUPPORTED_FPS = [24, 30, 60] as const;
 export const DEFAULT_CHUNK_COUNT = 1;
 export const DEFAULT_CHUNK_WORKERS = 1;
 const SERIAL_CAPTURE_MIN_PARALLEL_FRAMES = String(Number.MAX_SAFE_INTEGER);
@@ -474,7 +483,7 @@ function toDistributedConfig(
   input: Pick<ChunkExecutionRequest, 'chunkSizeFrames' | 'maxParallelChunks' | 'targetChunkFrames'>,
 ): DistributedRenderConfig {
   return {
-    fps: options.fps as 24 | 30 | 60,
+    fps: options.fps as (typeof CHUNK_SUPPORTED_FPS)[number],
     width: dimensions.width,
     height: dimensions.height,
     format: options.format,
@@ -579,8 +588,10 @@ export async function createRenderPlan(
     node: process.version,
     chromium: process.env.PRODUCER_EXPECTED_CHROMIUM_MAJOR ?? 'unknown',
   };
-  if (request.options.fps !== 24 && request.options.fps !== 30 && request.options.fps !== 60) {
-    throw new TypeError('Distributed chunk execution supports fps 24, 30, or 60');
+  if (!(CHUNK_SUPPORTED_FPS as readonly number[]).includes(request.options.fps)) {
+    throw new TypeError(
+      `Distributed chunk execution supports fps ${CHUNK_SUPPORTED_FPS.join(', ')}`,
+    );
   }
   const planDir = resolve(
     request.planDir ??

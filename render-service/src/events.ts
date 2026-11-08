@@ -45,6 +45,19 @@ export interface RenderEvent {
   durationMs?: number;
   /** Time from being granted an execution slot to finishing. */
   renderMs?: number;
+  /**
+   * Executor stage breakdown, present on `render_job_finished` when the
+   * executor reports one (the chunk executor always does). These partition
+   * `renderMs`: planning the immutable render plan, rendering every chunk, and
+   * assembling the final container. Without them a slow render cannot be
+   * attributed to capture versus assembly, and a chunk-parallel run cannot be
+   * proven faster than a serial one.
+   */
+  planMs?: number;
+  chunksMs?: number;
+  assembleMs?: number;
+  /** Frames the render actually encoded — the denominator for frames/second. */
+  totalFrames?: number;
   /** Other jobs still queued when the event fired, excluding this one. */
   queued?: number;
   /**
@@ -129,6 +142,10 @@ const SERIALIZED_FIELDS = [
   'queueWaitMs',
   'durationMs',
   'renderMs',
+  'planMs',
+  'chunksMs',
+  'assembleMs',
+  'totalFrames',
   'queued',
   'running',
   'errorCode',
@@ -156,8 +173,16 @@ function summarize(event: RenderEvent): string {
       return `render job queued (queued=${event.queued ?? 0}, running=${event.running ?? 0})`;
     case 'render_job_started':
       return `render job started after ${event.queueWaitMs ?? 0}ms in queue`;
-    case 'render_job_finished':
-      return `render job ${event.outcome ?? 'finished'} in ${event.durationMs ?? 0}ms`;
+    case 'render_job_finished': {
+      const base = `render job ${event.outcome ?? 'finished'} in ${event.durationMs ?? 0}ms`;
+      // Only mention the breakdown when the executor published one; a plain
+      // in-process render has no stages and must not print zeroes.
+      if (event.planMs === undefined && event.chunksMs === undefined) return base;
+      return (
+        `${base} (plan ${event.planMs ?? 0}ms, ` +
+        `chunks ${event.chunksMs ?? 0}ms, assemble ${event.assembleMs ?? 0}ms)`
+      );
+    }
     case 'render_admission_rejected':
       return `admission rejected (${event.reason ?? 'unknown'}) on ${event.route ?? 'unknown'}`;
     case 'preview_request':

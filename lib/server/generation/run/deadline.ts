@@ -18,8 +18,11 @@ export const STEP_DEADLINES_MS = {
   agentProfiles: 120_000,
   /** Per attempt. */
   sceneContent: 300_000,
-  /** Per attempt. */
-  sceneActions: 60_000,
+  /**
+   * Per attempt. The same work as `sceneContent` — one model call that returns
+   * a whole scene — so it gets the same budget rather than a quarter of it.
+   */
+  sceneActions: 300_000,
   /** Per clip attempt (POST /api/generate/tts). */
   narrationClip: 30_000,
 } as const;

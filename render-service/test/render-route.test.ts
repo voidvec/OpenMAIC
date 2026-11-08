@@ -306,7 +306,8 @@ describe('render HTTP contract through a replaceable executor', () => {
     expect(submit.headers.get(OWNER_BOUND_HEADER)).toBe('1');
     const { jobId } = (await submit.json()) as { jobId: string };
 
-    await expect(waitForPoll(app, jobId, 'succeeded')).resolves.toEqual({
+    const body = await waitForPoll(app, jobId, 'succeeded');
+    expect(body).toMatchObject({
       jobId,
       status: 'succeeded',
       progress: 1,
@@ -315,6 +316,13 @@ describe('render HTTP contract through a replaceable executor', () => {
       totalFrames: 24,
       done: true,
     });
+    // End-to-end export time is reported for a terminal job — this is what the
+    // app surfaces as "how long the MP4 took", so the field is part of the
+    // contract rather than an incidental extra.
+    expect(typeof body.elapsedMs).toBe('number');
+    expect(body.elapsedMs as number).toBeGreaterThanOrEqual(0);
+    // No executor performance report ⇒ no performance block (not an empty one).
+    expect(body).not.toHaveProperty('performance');
 
     const download = await app.fetch(jobRequest(`/owner-bound/render/${jobId}/download`));
     expect(download.status).toBe(200);
@@ -322,6 +330,42 @@ describe('render HTTP contract through a replaceable executor', () => {
     expect(download.headers.get('content-type')).toBe('video/mp4');
     expect(download.headers.get('content-disposition')).toBe(`attachment; filename="${jobId}.mp4"`);
     expect(Buffer.from(await download.arrayBuffer()).toString()).toBe('fake-mp4');
+  });
+
+  it('relays executor stage timings so a slow export can be attributed', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'render-route-performance-'));
+    scratch.push(dir);
+    const executor: RenderExecutor = {
+      async execute(request) {
+        await writeFile(request.outputPath, Buffer.from('fake-mp4'));
+        return {
+          status: 'succeeded',
+          performance: {
+            totalElapsedMs: 12345,
+            stages: { planMs: 100, chunksMs: 11000, assembleMs: 1245 },
+            workers: 1,
+            totalFrames: 240,
+            captureMode: 'screenshot',
+          },
+        };
+      },
+    };
+    const { app } = testApp(executor, { makeProjectDir: async () => dir });
+
+    const submit = await app.fetch(renderRequest());
+    const { jobId } = (await submit.json()) as { jobId: string };
+    const body = await waitForPoll(app, jobId, 'succeeded');
+
+    // Numeric-only projection: the breakdown is what makes "the render took
+    // 12 minutes" actionable (capture vs assembly), and it must survive the
+    // job-store round trip unchanged.
+    expect(body.performance).toEqual({
+      totalElapsedMs: 12345,
+      stages: { planMs: 100, chunksMs: 11000, assembleMs: 1245 },
+      workers: 1,
+      totalFrames: 240,
+      captureMode: 'screenshot',
+    });
   });
 
   it('preserves queued cancellation and its polling shape', async () => {
@@ -339,13 +383,15 @@ describe('render HTTP contract through a replaceable executor', () => {
     );
     expect(cancel.status).toBe(200);
     await expect(cancel.json()).resolves.toEqual({ cancelled: true });
-    await expect(waitForPoll(app, jobId, 'cancelled')).resolves.toEqual({
+    const cancelled = await waitForPoll(app, jobId, 'cancelled');
+    expect(cancelled).toMatchObject({
       jobId,
       status: 'cancelled',
       progress: 0,
       currentStage: 'cancelled',
       done: true,
     });
+    expect(typeof cancelled.elapsedMs).toBe('number');
   });
 
   it('preserves the running-cancellation error in polling', async () => {
@@ -376,7 +422,7 @@ describe('render HTTP contract through a replaceable executor', () => {
       jobRequest(`/owner-bound/render/${jobId}`, 'owner-a', { method: 'DELETE' }),
     );
     expect(cancel.status).toBe(200);
-    await expect(waitForPoll(app, jobId, 'cancelled')).resolves.toEqual({
+    expect(await waitForPoll(app, jobId, 'cancelled')).toMatchObject({
       jobId,
       status: 'cancelled',
       progress: 0,
