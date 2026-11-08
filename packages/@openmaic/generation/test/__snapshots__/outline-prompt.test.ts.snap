@@ -613,10 +613,11 @@ Use image generation only for slide scenes that need a static visual and have no
 - Each image request specifies: \`prompt\` (description for the generation model), \`elementId\` (unique placeholder), and optionally \`aspectRatio\` (default "16:9") and \`style\`
 - **Image IDs**: use \`"gen_img_1"\`, \`"gen_img_2"\`, etc. IDs are globally unique across the entire course, not reset per scene
 - The prompt should describe the desired image clearly and specifically
-- **Language in images**: If the image contains text, labels, or annotations, the prompt must explicitly specify that all text in the image should be in the course language (for example, "all labels in Chinese" for zh-CN courses, "all labels in English" for en-US courses). For purely visual images without text, language does not matter
+- **Keep wording out of the image**: generation models render lettering as garbled pseudo-text, so describe the visual only — objects, icons, arrows, color blocks, spatial layout, lighting, mood. Never ask for labels, captions, titles, legends, axis text, or anything that spells out words (avoid prompts like "an infographic labeled HTTP" or "a diagram with the words TLS handshake"). Put every word in the slide body, \`keyPoints\`, and narration instead
+- **Convey structure without words**: show relationships with icons, arrows, connectors, color-coded regions, and relative position rather than boxed captions. If the content genuinely requires a real screenshot or UI with readable text, use \`suggestedImageIds\` instead of a generated image
 - **Avoid duplicate images across slides**: Each generated image must be visually distinct. Do not request near-identical images for different slides. If multiple slides cover the same topic, vary the visual angle, scope, or style
 - **Cross-scene reuse**: To reuse a generated image in a different scene, reference the same \`elementId\` in the later scene's content without adding a new \`mediaGenerations\` entry. Only the scene that first defines the \`elementId\` in its \`mediaGenerations\` should include the generation request
-- Use generated images for static content: diagrams, charts, illustrations, portraits, landscapes
+- Use generated images for static visual content: conceptual illustrations, scene depictions, abstract diagrams, charts rendered as pure shapes without axis labels, portraits, landscapes
 
 Image example:
 
@@ -624,7 +625,7 @@ Image example:
 "mediaGenerations": [
   {
     "type": "image",
-    "prompt": "A colorful diagram showing the water cycle with evaporation, condensation, and precipitation arrows",
+    "prompt": "A clean flat-vector illustration of the water cycle: a deep blue ocean, curling pale arrows of vapor rising into a soft white cloud, condensation droplets falling as rain over green hills",
     "elementId": "gen_img_1",
     "aspectRatio": "16:9"
   }
@@ -1169,10 +1170,11 @@ Use image generation only for slide scenes that need a static visual and have no
 - Each image request specifies: \`prompt\` (description for the generation model), \`elementId\` (unique placeholder), and optionally \`aspectRatio\` (default "16:9") and \`style\`
 - **Image IDs**: use \`"gen_img_1"\`, \`"gen_img_2"\`, etc. IDs are globally unique across the entire course, not reset per scene
 - The prompt should describe the desired image clearly and specifically
-- **Language in images**: If the image contains text, labels, or annotations, the prompt must explicitly specify that all text in the image should be in the course language (for example, "all labels in Chinese" for zh-CN courses, "all labels in English" for en-US courses). For purely visual images without text, language does not matter
+- **Keep wording out of the image**: generation models render lettering as garbled pseudo-text, so describe the visual only — objects, icons, arrows, color blocks, spatial layout, lighting, mood. Never ask for labels, captions, titles, legends, axis text, or anything that spells out words (avoid prompts like "an infographic labeled HTTP" or "a diagram with the words TLS handshake"). Put every word in the slide body, \`keyPoints\`, and narration instead
+- **Convey structure without words**: show relationships with icons, arrows, connectors, color-coded regions, and relative position rather than boxed captions. If the content genuinely requires a real screenshot or UI with readable text, use \`suggestedImageIds\` instead of a generated image
 - **Avoid duplicate images across slides**: Each generated image must be visually distinct. Do not request near-identical images for different slides. If multiple slides cover the same topic, vary the visual angle, scope, or style
 - **Cross-scene reuse**: To reuse a generated image in a different scene, reference the same \`elementId\` in the later scene's content without adding a new \`mediaGenerations\` entry. Only the scene that first defines the \`elementId\` in its \`mediaGenerations\` should include the generation request
-- Use generated images for static content: diagrams, charts, illustrations, portraits, landscapes
+- Use generated images for static visual content: conceptual illustrations, scene depictions, abstract diagrams, charts rendered as pure shapes without axis labels, portraits, landscapes
 
 Image example:
 
@@ -1180,7 +1182,7 @@ Image example:
 "mediaGenerations": [
   {
     "type": "image",
-    "prompt": "A colorful diagram showing the water cycle with evaporation, condensation, and precipitation arrows",
+    "prompt": "A clean flat-vector illustration of the water cycle: a deep blue ocean, curling pale arrows of vapor rising into a soft white cloud, condensation droplets falling as rain over green hills",
     "elementId": "gen_img_1",
     "aspectRatio": "16:9"
   }

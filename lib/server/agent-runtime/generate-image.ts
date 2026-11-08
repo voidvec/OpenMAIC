@@ -275,6 +275,7 @@ export function generateImagePromptBlock(): string {
   return [
     'When the page needs a new visual rather than an existing URL, call `generate_image` first, then apply its returned `src` with `patch_stage` set or add an image element; generate_image never edits the page.',
     'When a NEW page needs visuals, obtain every real src first by reusing material or calling generate_image, then pass each image src with its description and dimensions in `generate_scene.media` so the content model sees the media while composing the page; media generation tools never edit the page.',
+    'Choose visuals on demand, not per page: add an image only where it genuinely clarifies the content (a concept diagram, metaphor, worked example, or scene illustration); narration- or list-driven pages work well text-only, so never force an image onto every page.',
   ].join('\n');
 }
 

@@ -1,0 +1,113 @@
+{
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 42,
+      "steps": 10,
+      "cfg": 2.0,
+      "sampler_name": "euler",
+      "scheduler": "sgm_uniform",
+      "denoise": 1.0,
+      "model": ["17", 0],
+      "positive": ["14", 0],
+      "negative": ["12", 0],
+      "latent_image": ["13", 0]
+    },
+    "_meta": { "title": "KSampler" }
+  },
+  "4": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": { "ckpt_name": "RealVisXL_V5.0_fp16.safetensors" },
+    "_meta": { "title": "Load Checkpoint" }
+  },
+  "5": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": ["10", 0],
+      "height": ["11", 0],
+      "batch_size": 1
+    },
+    "_meta": { "title": "Empty Latent" }
+  },
+  "6": {
+    "class_type": "PrimitiveStringMultiline",
+    "inputs": { "value": "a modern city skyline at sunset, photorealistic" },
+    "_meta": { "title": "Input Prompt" }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": ["6", 0], "clip": ["4", 1] },
+    "_meta": { "title": "Positive Encode" }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["3", 0], "vae": ["4", 2] },
+    "_meta": { "title": "VAE Decode" }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": { "filename_prefix": "openmaic/sdxl-fast", "images": ["16", 0] },
+    "_meta": { "title": "Save Image" }
+  },
+  "10": {
+    "class_type": "PrimitiveInt",
+    "inputs": { "value": 1024, "control_after_generate": "fixed" },
+    "_meta": { "title": "Width" }
+  },
+  "11": {
+    "class_type": "PrimitiveInt",
+    "inputs": { "value": 1024, "control_after_generate": "fixed" },
+    "_meta": { "title": "Height" }
+  },
+  "12": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "text, letters, words, chinese characters, japanese characters, typography, captions, labels, subtitles, watermark, signature, gibberish text, pseudo text, low quality, blurry, distorted, deformed",
+      "clip": ["4", 1]
+    },
+    "_meta": { "title": "Negative Encode" }
+  },
+  "13": {
+    "class_type": "LatentUpscaleBy",
+    "inputs": {
+      "upscale_method": "bilinear",
+      "scale_by": 0.5,
+      "samples": ["5", 0]
+    },
+    "_meta": { "title": "Sample Size" }
+  },
+  "14": {
+    "class_type": "ConditioningConcat",
+    "inputs": {
+      "conditioning_to": ["7", 0],
+      "conditioning_from": ["15", 0]
+    },
+    "_meta": { "title": "Style Concat" }
+  },
+  "15": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "clean minimalist flat vector illustration, soft pastel color palette, simple shapes, generous white space, professional educational slide artwork, abstract visual metaphor, no text",
+      "clip": ["4", 1]
+    },
+    "_meta": { "title": "Style Prompt" }
+  },
+  "16": {
+    "class_type": "ImageScaleBy",
+    "inputs": {
+      "upscale_method": "bilinear",
+      "scale_by": 2.0,
+      "image": ["8", 0]
+    },
+    "_meta": { "title": "Final Upscale" }
+  },
+  "17": {
+    "class_type": "LoraLoaderModelOnly",
+    "inputs": {
+      "lora_name": "sdxl_lightning_8step_lora.safetensors",
+      "strength_model": 1.0,
+      "model": ["4", 0]
+    },
+    "_meta": { "title": "Lightning LoRA" }
+  }
+}
