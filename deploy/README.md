@@ -45,6 +45,15 @@ git clone https://github.com/voidvec/OpenMAIC.git    # 或 git@github.com:voidve
 cd OpenMAIC
 ```
 
+**已经在跑的机器**：fork 的提交历史会被压缩重写（把碎提交按能力合并），所以别指望
+`git pull` 能快进。拉到新版本用：
+
+```bash
+git fetch origin && git reset --hard origin/main
+```
+
+本地改动先自己 stash 或备份 —— `reset --hard` 会丢。容器不用重建，代码变了再按 §5 重启。
+
 两份深度手册在 `.workbuddy/docs/`，**不在 git 里**（`.git/info/exclude` 忽略 `.workbuddy/`），
 换机器要单独拷：
 
