@@ -181,12 +181,12 @@ services:
   # 避免把上一层的旁白缓存也塞进构建上下文。
   #
   # ── 为什么 piper 降为可选档（2026-11-03）────────────────────────────────
-  # 它从来没有被自动调用过。两条生成链路都不做「edge 失败 → piper」的降级：
-  #   · 主链路 POST /api/generate/tts 只取 slots.tts 的那一个 provider，无 failover；
-  #   · agent 链路 scene-tts.ts 的 fallbackCandidates() 只遍历
-  #     enabledServerTTSProviderIds()（读 legacy server-providers.yml + env，
-  #     该文件 2026-11-03 已删 ⇒ 永远是空数组），而且 TTS_PROVIDERS[id]
-  #     会把 custom-* 和 piper 一起过滤掉。
+  # 它从来没有被自动接管过（2026-11-11 口径按层区分）：
+  #   · 配置层：`openmaic.yml` 的 slots.tts 单指派 edge-tts:edge-tts，无 fallback 键；
+  #     主链路 POST /api/generate/tts 只取这一个 provider，piper 不会自动顶上。
+  #   · 运行时：agent 链路 scene-tts.ts 的 fallbackCandidates() 已在提交 652ff977 修好，
+  #     主 provider 运行时失败会切到其他启用的服务端 TTS provider；
+  #     TTS_PROVIDERS[id] 仍会把 custom-* 和 piper 过滤掉，所以也不会掉到 piper。
   # 结果：它此前常驻内存只为了每 30s 答一次 healthcheck。
   #
   # 更关键的是它**不适合当兜底**：自带的中文 G2P 会把技术词念错
@@ -218,8 +218,9 @@ services:
       start_period: 20s
 
   # 服务端生成默认后端 —— openmaic.yml 的 `slots.tts: edge-tts:edge-tts`。
-  # ⚠️ 没有自动降级：edge 一旦不可用，这套课堂就没有旁白（不会掉到 piper）。
-  # 原因见上方 piper 那段注释。edge-tts 的可用性是这条链路的单点。
+  # ⚠️ 配置层没有 failover：slots.tts 是单指派，piper 不会自动接管。
+  # 但 agent 运行时已有 provider failover（652ff977 / scene-tts.ts:399-404）；
+  # 两层区别与 piper 不适合当兜底的原因见上方 piper 那段注释。
   # edge-tts 走微软 consumer 端点（非官方 API），容器需能解析并连上
   # speech.platform.bing.com:443。
   #
