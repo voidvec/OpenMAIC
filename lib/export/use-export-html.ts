@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { setExportBusy, useExportBusy } from '@/lib/store/export-busy';
+import { useCallback } from 'react';
 import { toast } from 'sonner';
 import { resolveSaveTarget, writeSaveTarget, SAVE_DIR_IDS } from '@/lib/download/save-target';
 import { useStageStore } from '@/lib/store/stage';
@@ -65,7 +66,7 @@ export interface ExportHtmlOptions {
 }
 
 export function useExportHtml() {
-  const [exporting, setExporting] = useState(false);
+  const exporting = useExportBusy('html');
   const { t, locale } = useI18n();
   // The exported file is handed to this deployment's learners, so it names
   // this deployment rather than the product it was built from.
@@ -82,7 +83,7 @@ export function useExportHtml() {
       const target = await resolveSaveTarget(SAVE_DIR_IDS.html);
       if (!target) return;
 
-      setExporting(true);
+      setExportBusy('html', true);
       const toastId = toast.loading(t('export.exporting'));
 
       try {
@@ -217,7 +218,7 @@ export function useExportHtml() {
         log.error('Standalone HTML export failed:', error);
         toast.error(t('export.exportFailed'), { id: toastId });
       } finally {
-        setExporting(false);
+        setExportBusy('html', false);
       }
     },
     [t, locale, brand.productName],

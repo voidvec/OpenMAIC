@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { setExportBusy, useExportBusy } from '@/lib/store/export-busy';
+import { useCallback } from 'react';
 import { toast } from 'sonner';
 import { resolveSaveTarget, writeSaveTarget, SAVE_DIR_IDS } from '@/lib/download/save-target';
 import { useStageStore } from '@/lib/store/stage';
@@ -377,7 +378,7 @@ export async function buildClassroomExportZip(
 }
 
 export function useExportClassroom() {
-  const [exporting, setExporting] = useState(false);
+  const exporting = useExportBusy('classroomZip');
   const { t } = useI18n();
 
   const exportClassroomZip = useCallback(async () => {
@@ -389,7 +390,7 @@ export function useExportClassroom() {
     const target = await resolveSaveTarget(SAVE_DIR_IDS.classroomZip);
     if (!target) return;
 
-    setExporting(true);
+    setExportBusy('classroomZip', true);
     const toastId = toast.loading(t('export.exporting'));
 
     try {
@@ -428,7 +429,7 @@ export function useExportClassroom() {
       log.error('Classroom ZIP export failed:', error);
       toast.error(t('export.exportFailed'), { id: toastId });
     } finally {
-      setExporting(false);
+      setExportBusy('classroomZip', false);
     }
   }, [t]);
 

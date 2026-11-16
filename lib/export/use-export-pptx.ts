@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
+import { isExportBusy, setExportBusy, useExportBusy } from '@/lib/store/export-busy';
+import { useCallback } from 'react';
 import type pptxgen from 'pptxgenjs';
 import { validateShapeGeometry, RENDER_PATH_LIMITS, shapeToTextFallback } from '@openmaic/geometry';
 import tinycolor from 'tinycolor2';
@@ -1571,8 +1572,7 @@ export interface PptxExportChoice {
 export type { DeliverySku };
 
 export function useExportPPTX({ classroomOrigin }: UseExportPPTXOptions = {}) {
-  const [exporting, setExporting] = useState(false);
-  const exportingRef = useRef(false);
+  const exporting = useExportBusy('pptx');
   const { t, locale } = useI18n();
   const brand = useBrand();
 
@@ -1627,13 +1627,12 @@ export function useExportPPTX({ classroomOrigin }: UseExportPPTXOptions = {}) {
       hasPptxContent = true,
       saveId: string = SAVE_DIR_IDS.slides,
     ) => {
-      if (exportingRef.current) return;
+      if (isExportBusy('pptx')) return;
       if (!hasPptxContent) {
         toast.warning(t('export.noSlides'));
         return;
       }
-      exportingRef.current = true;
-      setExporting(true);
+      setExportBusy('pptx', true);
       // The folder picker is opened here, in the caller's task: the
       // `setTimeout` below (which yields the UI thread so the spinner paints)
       // would otherwise spend the click's user activation, and the picker
@@ -1641,8 +1640,7 @@ export function useExportPPTX({ classroomOrigin }: UseExportPPTXOptions = {}) {
       void (async () => {
         const target = await resolveSaveTarget(saveId);
         if (!target) {
-          exportingRef.current = false;
-          setExporting(false);
+          setExportBusy('pptx', false);
           return;
         }
         setTimeout(async () => {
@@ -1658,8 +1656,7 @@ export function useExportPPTX({ classroomOrigin }: UseExportPPTXOptions = {}) {
               description: err instanceof Error && err.message ? err.message : undefined,
             });
           } finally {
-            exportingRef.current = false;
-            setExporting(false);
+            setExportBusy('pptx', false);
           }
         }, 100);
       })();
