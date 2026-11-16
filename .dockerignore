@@ -5,7 +5,9 @@
 # over the image's Linux links leaves `rollup` (and everything else) pointing at
 # a path that does not exist — `pnpm run build:packages` then dies with
 # "Cannot find module '/app/packages/mathml2omml/node_modules/rollup/...'".
+node_modules
 **/node_modules
+.pnpm-store
 **/.pnpm-store
 
 # build output
