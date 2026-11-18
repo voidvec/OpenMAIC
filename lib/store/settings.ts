@@ -103,6 +103,11 @@ export interface SettingsState {
 
   /** Always open the outline review before generating scenes. */
   reviewOutlineEnabled: boolean;
+  /**
+   * When the workbench agent asks a question with a recommended option, choose
+   * it for the user after a short countdown they can interrupt.
+   */
+  autoConfirmRecommendedAnswer: boolean;
 
   /**
    * Whether exported deliverables are also queued for cloud delivery.
@@ -172,6 +177,7 @@ export interface SettingsState {
   setASRLanguage: (language: string) => void;
   setReviewOutlineEnabled: (enabled: boolean) => void;
   setDeliverToCloud: (enabled: boolean) => void;
+  setAutoConfirmRecommendedAnswer: (enabled: boolean) => void;
 
   // Playback actions
   setTTSMuted: (muted: boolean) => void;
@@ -205,6 +211,7 @@ const PERSISTED_FIELDS = [
   'asrLanguage',
   'reviewOutlineEnabled',
   'deliverToCloud',
+  'autoConfirmRecommendedAnswer',
   'ttsMuted',
   'ttsVolume',
   'autoPlayLecture',
@@ -287,6 +294,7 @@ export const useSettingsStore = create<SettingsState>()(
       asrLanguage: '',
       reviewOutlineEnabled: false,
       deliverToCloud: true,
+      autoConfirmRecommendedAnswer: true,
 
       // Playback controls
       ttsMuted: false,
@@ -315,6 +323,7 @@ export const useSettingsStore = create<SettingsState>()(
       setASRLanguage: (language) => set({ asrLanguage: language }),
       setReviewOutlineEnabled: (enabled) => set({ reviewOutlineEnabled: enabled }),
       setDeliverToCloud: (enabled) => set({ deliverToCloud: enabled }),
+      setAutoConfirmRecommendedAnswer: (enabled) => set({ autoConfirmRecommendedAnswer: enabled }),
 
       setTTSMuted: (muted) => set({ ttsMuted: muted }),
       setTTSVolume: (volume) => set({ ttsVolume: Math.max(0, Math.min(1, volume)) }),

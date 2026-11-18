@@ -4,6 +4,7 @@ import { useState, useCallback } from 'react';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { Switch } from '@/components/ui/switch';
 import { UsageDashboard } from './usage-dashboard';
 import {
   AlertDialog,
@@ -16,7 +17,6 @@ import {
 } from '@/components/ui/alert-dialog';
 import { Loader2, Trash2, AlertTriangle, CloudUpload } from 'lucide-react';
 import { useI18n } from '@/lib/hooks/use-i18n';
-import { Switch } from '@/components/ui/switch';
 import {
   clearLocalCache,
   clearLocalStorageKeepingImportState,
@@ -53,6 +53,8 @@ async function clearPersistedStore(persistApi: PersistApi, fallbackName: string)
 
 export function GeneralSettings() {
   const { t } = useI18n();
+  const autoConfirm = useSettingsStore((s) => s.autoConfirmRecommendedAnswer);
+  const setAutoConfirm = useSettingsStore((s) => s.setAutoConfirmRecommendedAnswer);
 
   // Cloud delivery is a per-machine operator preference: it decides whether the
   // export you just made also lands in the customer's cloud folder.
@@ -129,6 +131,24 @@ export function GeneralSettings() {
             {t('settings.deliverToCloudOffHint')}
           </p>
         )}
+      </div>
+
+      {/* The workbench agent's questions: auto-confirm a recommended option. */}
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          <Label htmlFor="settings-auto-confirm" className="text-sm font-medium">
+            {t('settings.autoConfirmRecommended')}
+          </Label>
+          <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+            {t('settings.autoConfirmRecommendedDesc')}
+          </p>
+        </div>
+        <Switch
+          id="settings-auto-confirm"
+          data-testid="settings-auto-confirm"
+          checked={autoConfirm}
+          onCheckedChange={setAutoConfirm}
+        />
       </div>
 
       {/* Danger Zone - Clear Cache */}
